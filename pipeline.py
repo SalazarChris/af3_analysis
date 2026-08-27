@@ -91,12 +91,23 @@ def _stage_extract_metrics(
     t0 = time.time()
     try:
         from importlib.util import spec_from_file_location, module_from_spec
-        script_path = (
-            Path(__file__).resolve().parents[3]
-            / "af3inputbuilder"
-            / "scripts"
-            / "af3_condition_centric_extraction.py"
+        # Walk up from pipeline.py to find the sibling af3inputbuilder/ directory.
+        # The exact depth varies depending on install layout (src/ vs flat).
+        _pipeline_dir = Path(__file__).resolve().parent
+        _af3inputbuilder_script = (
+            "af3inputbuilder", "scripts", "af3_condition_centric_extraction.py"
         )
+        script_path = None
+        for ancestor in [_pipeline_dir] + list(_pipeline_dir.parents):
+            candidate = ancestor.joinpath(*_af3inputbuilder_script)
+            if candidate.is_file():
+                script_path = candidate
+                break
+        if script_path is None:
+            raise FileNotFoundError(
+                "Cannot locate af3_condition_centric_extraction.py "
+                f"(searched up from {_pipeline_dir})"
+            )
         spec = spec_from_file_location("extraction_module", script_path)
         module = module_from_spec(spec)
         spec.loader.exec_module(module)
