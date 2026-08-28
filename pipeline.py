@@ -14,7 +14,7 @@ import json
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import re
 
@@ -242,23 +242,63 @@ def _stage_run_analysis(output_dir: Path, config: "AnalysisConfig") -> StageResu
     except Exception as e:
         return StageResult(name="run_analysis", status="fail", duration_s=time.time() - t0, message=str(e))
 
-def _stage_generate_figures(output_dir: Path) -> StageResult:
+def _stage_generate_figures(
+    output_dir: Path,
+    *,
+    visualization_version: str = "v1",
+    metadata_path: Optional[str] = None,
+    environment_filter: Optional[str] = None,
+) -> StageResult:
     """Generate figures using the visualisation orchestrator.
 
-    The orchestrator is imported lazily to avoid import‑time side effects.
+    Parameters
+    ----------
+    output_dir : Path
+        The run directory containing ``tables/`` and ``figures/``.
+    visualization_version : str
+        ``"v1"`` for the existing 8 figures, ``"v2"`` for the
+        publication-quality factor-aware figures, or ``"both"``
+        to generate both.
+    metadata_path : str, optional
+        Path to ``experiment_metadata.json`` for V2.
+    environment_filter : str, optional
+        Restrict V2 to a single environment.
     """
     t0 = time.time()
     try:
-        from af3_analysis.visualization.orchestrator import generate_all_figures
+        from af3_analysis.visualization.orchestrator import (
+            generate_all_figures,
+            generate_all_figures_v2,
+        )
         tables_dir = output_dir / "tables"
         figures_dir = output_dir / "figures"
-        results = generate_all_figures(str(tables_dir), str(figures_dir))
+        results = {}
+
+        # V1 figures
+        if visualization_version in ("v1", "both"):
+            v1_results = generate_all_figures(
+                str(tables_dir), str(figures_dir),
+                metadata_path=metadata_path,
+            )
+            if v1_results:
+                results.update(v1_results)
+
+        # V2 figures
+        if visualization_version in ("v2", "both"):
+            v2_results = generate_all_figures_v2(
+                str(tables_dir), str(figures_dir),
+                metadata_path=metadata_path,
+                environment_filter=environment_filter,
+            )
+            if v2_results:
+                results.update(v2_results)
+
         status = "pass" if results else "fail"
         return StageResult(
-            name="generate_figures",
+            name=f"generate_figures_{visualization_version}",
             status=status,
             duration_s=time.time() - t0,
-            message="Figure generation completed",
+            message=f"Figure generation completed ({visualization_version})",
             records=len(results) if results else 0,
         )
     except Exception as e:
@@ -282,12 +322,32 @@ def _stage_generate_reports(output_dir: Path, result: PipelineResult) -> StageRe
 # ---------------------------------------------------------------------------
 
 def run_pipeline(
-    config: AnalysisConfig, *, save_raw_json: bool = False, save_summary_json: bool = False
+    config: AnalysisConfig,
+    *,
+    save_raw_json: bool = False,
+    save_summary_json: bool = False,
+    visualization_version: str = "both",
+    environment_filter: Optional[str] = None,
 ) -> PipelineResult:
     """Execute the full AF3 analysis pipeline.
 
-    Returns a :class:`PipelineResult` containing stage information and overall
-    success status.
+    Parameters
+    ----------
+    config : AnalysisConfig
+        Pipeline configuration.
+    save_raw_json : bool
+        If *True*, save raw extraction JSON.
+    save_summary_json : bool
+        If *True*, save summary extraction JSON.
+    visualization_version : str
+        ``"v1"`` for existing figures, ``"v2"`` for publication-quality
+        figures, ``"both"`` for both.  Default is ``"both"``.
+    environment_filter : str, optional
+        Restrict V2 to a single environment.
+
+    Returns
+    -------
+    PipelineResult
     """
     run_dir = create_run_directory(config)
     pipeline = PipelineResult(output_dir=str(run_dir), run_id=config.run_id)
@@ -316,7 +376,20 @@ def run_pipeline(
 
     # Stage 5 – figures
     if getattr(config, "generate_figures", True):
-        s5 = _stage_generate_figures(Path(run_dir))
+        # Resolve metadata path for V2
+        meta_path = None
+        raw_root = getattr(config, "raw_af3_root", None)
+        if raw_root is not None:
+            candidate = Path(raw_root) / "experiment_metadata.json"
+            if candidate.is_file():
+                meta_path = str(candidate)
+
+        s5 = _stage_generate_figures(
+            Path(run_dir),
+            visualization_version=visualization_version,
+            metadata_path=meta_path,
+            environment_filter=environment_filter,
+        )
         pipeline.stages.append(s5)
         if s5.status == "pass":
             pipeline.n_manifest_rows += s5.records

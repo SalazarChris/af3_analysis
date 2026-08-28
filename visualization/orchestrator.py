@@ -187,6 +187,160 @@ def generate_all_figures(
     else:
         return None
 
+# =====================================================================
+# V2 — Publication-quality, factor-aware visualization
+# =====================================================================
+
+def generate_all_figures_v2(
+    tables_dir: str,
+    figures_dir: str,
+    *,
+    metadata_path: Optional[str] = None,
+    experiment_design: Optional["ExperimentDesign"] = None,
+    environment_filter: Optional[str] = None,
+):
+    """Generate V2 publication-quality figures.
+
+    This is the V2 entry point.  It produces factor-aware figures
+    (Figures 7 and 8 redesigns) in a ``v2/`` subdirectory of
+    *figures_dir*, leaving V1 output untouched.
+
+    Parameters
+    ----------
+    tables_dir : str
+        Directory containing the analysis CSVs.
+    figures_dir : str
+        Base figures directory.  V2 output goes into ``<figures_dir>/v2/``.
+    metadata_path : str, optional
+        Path to ``experiment_metadata.json``.
+    experiment_design : ExperimentDesign, optional
+        Pre-loaded metadata.
+    environment_filter : str, optional
+        Restrict to a single environment (e.g. ``"baseline"``).
+        ``None`` pools all environments.
+
+    Returns
+    -------
+    dict mapping figure name → output path, or ``None`` on failure.
+    """
+    print("\n================ Starting V2 Visualization Generation ================")
+
+    # 1. Load data
+    try:
+        data = load_data(Path(tables_dir))
+    except Exception as e:
+        print(f"FATAL ERROR during data loading: {e}")
+        return None
+
+    # 1b. Load metadata
+    design = experiment_design
+    if design is None and metadata_path is not None and load_experiment_design is not None:
+        try:
+            design = load_experiment_design(metadata_path)
+            print(f"  Loaded experiment metadata: {design.experiment_id}")
+        except Exception as e:
+            print(f"  WARNING: Could not load metadata: {e}")
+            design = None
+
+    # 2. Create V2 output directory
+    v2_dir = Path(figures_dir) / "v2"
+    v2_dir.mkdir(parents=True, exist_ok=True)
+
+    fig_map: dict = {}
+    all_warnings: list = []
+    figure_results: list = []  # (name, path, result_dict)
+
+    # 3. Generate V2 Figure 7
+    try:
+        from .v2.figure7 import generate_figure7
+        result7 = generate_figure7(
+            data["seed_aggregated"], v2_dir,
+            design=design, environment_filter=environment_filter,
+        )
+        if result7["status"] == "pass":
+            fig_map["Figure_7_Distribution_V2"] = result7["output_path"]
+            figure_results.append(("Figure_7_Distribution_V2", result7["output_path"], result7))
+            print(f"  Figure 7 V2: {result7['n_observations']} observations, "
+                  f"{len(result7.get('warnings', []))} warnings")
+            all_warnings.extend(result7.get("warnings", []))
+        else:
+            print(f"  Figure 7 V2: SKIPPED — {result7.get('reason', 'unknown')}")
+    except Exception as e:
+        print(f"  Figure 7 V2 FAILED: {e}")
+        import traceback; traceback.print_exc()
+
+    # 4. Generate V2 Figure 8
+    try:
+        from .v2.figure8 import generate_figure8
+        result8 = generate_figure8(
+            data["seed_aggregated"], v2_dir,
+            design=design, environment_filter=environment_filter,
+        )
+        if result8["status"] == "pass":
+            fig_map["Figure_8_Relationships_V2"] = result8["output_path"]
+            figure_results.append(("Figure_8_Relationships_V2", result8["output_path"], result8))
+            print(f"  Figure 8 V2: {result8['n_observations']} observations, "
+                  f"{len(result8.get('warnings', []))} warnings")
+            all_warnings.extend(result8.get("warnings", []))
+        else:
+            print(f"  Figure 8 V2: SKIPPED — {result8.get('reason', 'unknown')}")
+    except Exception as e:
+        print(f"  Figure 8 V2 FAILED: {e}")
+        import traceback; traceback.print_exc()
+
+    # 5. Generate V2 Effects Forest
+    try:
+        from .v2.effects import generate_effects_forest
+        result_fx = generate_effects_forest(
+            data["pairwise_comparisons"], v2_dir,
+        )
+        if result_fx["status"] == "pass":
+            fig_map["Effects_Forest_V2"] = result_fx["output_path"]
+            figure_results.append(("Effects_Forest_V2", result_fx["output_path"], result_fx))
+            all_warnings.extend(result_fx.get("warnings", []))
+        else:
+            print(f"  Effects Forest V2: SKIPPED — {result_fx.get('reason', 'unknown')}")
+    except Exception as e:
+        print(f"  Effects Forest V2 FAILED: {e}")
+        import traceback; traceback.print_exc()
+
+    # 6. Write manifest
+    try:
+        from .v2.validation import write_manifest, validate_figure
+        figure_meta = []
+        for fig_name, fpath, res in figure_results:
+            v_result = validate_figure(
+                fig_name, Path(fpath),
+                n_observations=res.get("n_observations", 0),
+                warnings=res.get("warnings"),
+            )
+            figure_meta.append({
+                "figure": fig_name,
+                "path": fpath,
+                "validation": v_result,
+            })
+        manifest_path = write_manifest(
+            v2_dir,
+            figures=figure_meta,
+            environment_strategy=(
+                "filtered" if environment_filter else "pooled"
+            ),
+        )
+        print(f"  Manifest written: {manifest_path}")
+    except Exception as e:
+        print(f"  WARNING: Could not write manifest: {e}")
+
+    # 7. Summary
+    if all_warnings:
+        print(f"\n  Total warnings: {len(all_warnings)}")
+        for w in all_warnings:
+            print(f"    - {w}")
+
+    print(f"\n================ V2 Visualization Complete: {len(fig_map)} figures ================")
+
+    return fig_map if fig_map else None
+
+
 # Example usage if this file was run directly (should be called by orchestrator.py)
 if __name__ == "__main__":
     print("--- Running visualization module dry-run ---")
