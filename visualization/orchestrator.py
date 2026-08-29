@@ -89,7 +89,7 @@ def generate_all_figures(
     try:
         data = load_data(Path(tables_dir))
     except Exception as e:
-        print(f"🚨 FATAL ERROR during data loading: {e}. Halting visualization process.")
+        print(f"FATAL ERROR during data loading: {e}. Halting visualization process.")
         return None
 
     # 1b. Load experiment design metadata (optional)
@@ -176,7 +176,7 @@ def generate_all_figures(
         fig_map["Scatter_Matrix"] = "fig_scatter_matrix.png"
 
     except Exception as e:
-        print(f"\n❌ An error occurred during visualization generation: {e}")
+        print(f"\nERROR during visualization generation: {e}")
         import traceback
         traceback.print_exc()
         all_figures_ready = False
