@@ -248,6 +248,7 @@ def _stage_generate_figures(
     visualization_version: str = "v1",
     metadata_path: Optional[str] = None,
     environment_filter: Optional[str] = None,
+    reference_condition: Optional[str] = None,
 ) -> StageResult:
     """Generate figures using the visualisation orchestrator.
 
@@ -263,6 +264,8 @@ def _stage_generate_figures(
         Path to ``experiment_metadata.json`` for V2.
     environment_filter : str, optional
         Restrict V2 to a single environment.
+    reference_condition : str, optional
+        Reference condition for structural figures.
     """
     t0 = time.time()
     try:
@@ -289,6 +292,7 @@ def _stage_generate_figures(
                 str(tables_dir), str(figures_dir),
                 metadata_path=metadata_path,
                 environment_filter=environment_filter,
+                reference_condition=reference_condition,
             )
             if v2_results:
                 results.update(v2_results)
@@ -401,6 +405,7 @@ def run_pipeline(
             visualization_version=visualization_version,
             metadata_path=meta_path,
             environment_filter=environment_filter,
+            reference_condition=config.reference_condition,
         )
         pipeline.stages.append(s5)
         if s5.status == "pass":

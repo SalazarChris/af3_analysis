@@ -36,6 +36,14 @@ from .core_plots import (
     plot_metric_relationships
 )
 
+def _safe_read_csv(path: Path):
+    """Read a CSV if it exists, else return an empty DataFrame."""
+    try:
+        return pd.read_csv(path)
+    except (FileNotFoundError, Exception):
+        return pd.DataFrame()
+
+
 def load_data(tables_dir: Path):
     """Loads all required CSV data files from the specified directory."""
     print("Loading visualization prerequisites...")
@@ -53,10 +61,18 @@ def load_data(tables_dir: Path):
         print(f"ERROR: Required data file missing. Please ensure {e} exists in the project directory.")
         raise
 
+    # Structural tables (optional — only present when coordinate_analysis_enabled=True)
+    structural_metrics_df = _safe_read_csv(tables_dir / "structural_metrics.csv")
+    structural_comparisons_df = _safe_read_csv(tables_dir / "structural_comparisons.csv")
+    structural_effects_df = _safe_read_csv(tables_dir / "structural_effects.csv")
+
     return {
         'seed_aggregated': seed_aggregated_df,
         'descriptive_stats': descriptive_stats_df,
-        'pairwise_comparisons': pairwise_comparisons_df
+        'pairwise_comparisons': pairwise_comparisons_df,
+        'structural_metrics': structural_metrics_df,
+        'structural_comparisons': structural_comparisons_df,
+        'structural_effects': structural_effects_df,
     }
 
 
@@ -198,6 +214,7 @@ def generate_all_figures_v2(
     metadata_path: Optional[str] = None,
     experiment_design: Optional["ExperimentDesign"] = None,
     environment_filter: Optional[str] = None,
+    reference_condition: Optional[str] = None,
 ):
     """Generate V2 publication-quality figures.
 
@@ -218,6 +235,8 @@ def generate_all_figures_v2(
     environment_filter : str, optional
         Restrict to a single environment (e.g. ``"baseline"``).
         ``None`` pools all environments.
+    reference_condition : str, optional
+        Reference condition for structural figures.
 
     Returns
     -------
@@ -303,6 +322,49 @@ def generate_all_figures_v2(
     except Exception as e:
         print(f"  Effects Forest V2 FAILED: {e}")
         import traceback; traceback.print_exc()
+
+    # 5b. Generate V2 Structural Figures (if structural comparison data available)
+    structural_comparisons = data.get("structural_comparisons")
+    if structural_comparisons is not None and not structural_comparisons.empty:
+        # Structural RMSD distribution
+        try:
+            from .v2.structural import generate_structural_rmsd_distribution
+            result_rmsd = generate_structural_rmsd_distribution(
+                structural_comparisons, v2_dir, design=design,
+                reference_condition=reference_condition,
+            )
+            if result_rmsd["status"] == "pass":
+                fig_map["Structural_RMSD_V2"] = result_rmsd["output_path"]
+                figure_results.append(("Structural_RMSD_V2", result_rmsd["output_path"], result_rmsd))
+                print(f"  Structural RMSD V2: {result_rmsd['n_observations']} observations, "
+                      f"{len(result_rmsd.get('warnings', []))} warnings")
+                all_warnings.extend(result_rmsd.get("warnings", []))
+            else:
+                print(f"  Structural RMSD V2: SKIPPED — {result_rmsd.get('reason', 'unknown')}")
+        except Exception as e:
+            print(f"  Structural RMSD V2 FAILED: {e}")
+            import traceback; traceback.print_exc()
+
+        # Structural variability
+        try:
+            from .v2.structural import generate_structural_variability
+            result_var = generate_structural_variability(
+                structural_comparisons, v2_dir, design=design,
+                reference_condition=reference_condition,
+            )
+            if result_var["status"] == "pass":
+                fig_map["Structural_Variability_V2"] = result_var["output_path"]
+                figure_results.append(("Structural_Variability_V2", result_var["output_path"], result_var))
+                print(f"  Structural Variability V2: {result_var['n_observations']} observations, "
+                      f"{len(result_var.get('warnings', []))} warnings")
+                all_warnings.extend(result_var.get("warnings", []))
+            else:
+                print(f"  Structural Variability V2: SKIPPED — {result_var.get('reason', 'unknown')}")
+        except Exception as e:
+            print(f"  Structural Variability V2 FAILED: {e}")
+            import traceback; traceback.print_exc()
+    else:
+        print("  Structural figures: SKIPPED — no structural_comparisons data")
 
     # 6. Write manifest
     try:
