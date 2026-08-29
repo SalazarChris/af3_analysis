@@ -374,6 +374,11 @@ def run_pipeline(
     s4 = _stage_run_analysis(Path(run_dir), config)
     pipeline.stages.append(s4)
 
+    # Stage 4b – structural analysis (optional)
+    if getattr(config, "coordinate_analysis_enabled", False):
+        s4b = _stage_structural_analysis(Path(run_dir), config)
+        pipeline.stages.append(s4b)
+
     # Stage 5 – figures
     if getattr(config, "generate_figures", True):
         # Resolve metadata path for V2
@@ -401,5 +406,212 @@ def run_pipeline(
     # Determine overall success
     pipeline.success = all(st.status == "pass" for st in pipeline.stages)
     return pipeline
+
+def _stage_structural_analysis(
+    run_dir: Path,
+    config: "AnalysisConfig",
+) -> StageResult:
+    """Run structural/geometric analysis on AF3 predicted structures.
+
+    This stage is optional and only runs when
+    ``config.coordinate_analysis_enabled`` is True.
+
+    Uses metadata-driven discovery, validation, and QC reporting.
+    """
+    import json
+    import time
+    t0 = time.time()
+
+    try:
+        from af3_analysis.io.structure_reader import parse_mmcif, StructureParseError
+        from af3_analysis.structural.config import StructuralConfig
+        from af3_analysis.structural.discovery import (
+            discover_structures,
+            populate_composition,
+            get_all_records,
+        )
+        from af3_analysis.structural.comparison import compare_conditions
+        from af3_analysis.structural.metrics.registry import get_default_registry
+        from af3_analysis.structural.tables import write_structural_tables
+    except ImportError as e:
+        return StageResult(
+            name="structural_analysis",
+            status="fail",
+            duration_s=time.time() - t0,
+            message=f"Structural analysis dependencies missing: {e}",
+        )
+
+    raw_root = getattr(config, "raw_af3_root", None)
+    if raw_root is None:
+        return StageResult(
+            name="structural_analysis",
+            status="fail",
+            duration_s=time.time() - t0,
+            message="No raw_af3_root configured for structural analysis",
+        )
+
+    raw_root = Path(raw_root)
+    if not raw_root.exists():
+        return StageResult(
+            name="structural_analysis",
+            status="fail",
+            duration_s=time.time() - t0,
+            message=f"Raw AF3 root does not exist: {raw_root}",
+        )
+
+    print("[Structural] Stage 4b: Structural analysis")
+    print(f"[Structural] Root: {raw_root}")
+
+    # ------------------------------------------------------------------
+    # Phase 1: Discover structures
+    # ------------------------------------------------------------------
+    print("[Structural] Phase 1: Discovering structure files...")
+
+    # Load expected conditions from experiment metadata if available
+    expected_conditions = None
+    metadata_path = raw_root / "experiment_metadata.json"
+    if metadata_path.is_file():
+        try:
+            with open(metadata_path) as f:
+                metadata = json.load(f)
+            expected_conditions = list(metadata.get("conditions", {}).keys())
+            print(f"[Structural] Loaded metadata: {len(expected_conditions)} expected conditions")
+        except Exception as e:
+            print(f"[Structural] Warning: could not load metadata: {e}")
+
+    report = discover_structures(raw_root, expected_conditions=expected_conditions)
+    print(f"[Structural] Discovered {report.n_discovered} structure files across {report.n_conditions} conditions")
+    print(f"[Structural] Orphans: {report.n_orphan}")
+
+    if report.n_discovered == 0:
+        return StageResult(
+            name="structural_analysis",
+            status="pass",
+            duration_s=time.time() - t0,
+            message="No structure files found; structural analysis skipped",
+            records=0,
+        )
+
+    # ------------------------------------------------------------------
+    # Phase 2: Parse structures
+    # ------------------------------------------------------------------
+    print("[Structural] Phase 2: Parsing CIF files...")
+
+    structures = []
+    parse_errors = []
+    all_records = get_all_records(report)
+    n_total = len(all_records)
+
+    for i, rec in enumerate(all_records):
+        try:
+            struct = parse_mmcif(rec.path, rec.condition_id, rec.seed, rec.sample)
+            structures.append(struct)
+        except StructureParseError as e:
+            parse_errors.append({
+                "condition_id": rec.condition_id,
+                "seed": rec.seed,
+                "sample": rec.sample,
+                "source_path": str(rec.path),
+                "status": "parse_error",
+                "reason": str(e),
+            })
+        except Exception as e:
+            parse_errors.append({
+                "condition_id": rec.condition_id,
+                "seed": rec.seed,
+                "sample": rec.sample,
+                "source_path": str(rec.path),
+                "status": "parse_error",
+                "reason": f"Unexpected error: {e}",
+            })
+        # Progress logging every 50 files
+        if (i + 1) % 50 == 0 or (i + 1) == n_total:
+            print(f"[Structural]   Parsed {i + 1}/{n_total}")
+
+    report.n_parse_success = len(structures)
+    report.n_parse_failure = len(parse_errors)
+    report.parse_errors = parse_errors
+
+    print(f"[Structural] Parsed: {len(structures)} success, {len(parse_errors)} failures")
+
+    if not structures:
+        return StageResult(
+            name="structural_analysis",
+            status="fail",
+            duration_s=time.time() - t0,
+            message=f"All structure files failed to parse ({len(parse_errors)} errors)",
+        )
+
+    # ------------------------------------------------------------------
+    # Phase 3: Populate composition information
+    # ------------------------------------------------------------------
+    print("[Structural] Phase 3: Analyzing entity composition...")
+    populate_composition(report, structures)
+
+    # ------------------------------------------------------------------
+    # Phase 4: Write QC report
+    # ------------------------------------------------------------------
+    print("[Structural] Phase 4: Writing QC report...")
+    qc_path = run_dir / "tables" / "structural_qc_report.txt"
+    qc_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(qc_path, "w", encoding="utf-8") as f:
+        f.write(report.summary())
+    print(f"[Structural] QC report: {qc_path}")
+
+    # ------------------------------------------------------------------
+    # Phase 5: Run comparisons
+    # ------------------------------------------------------------------
+    print("[Structural] Phase 5: Running structural comparisons...")
+
+    # Build structural config from analysis config
+    ref_condition = getattr(config, "reference_condition", None)
+    struct_config = StructuralConfig(
+        enabled=True,
+        reference_condition=ref_condition,
+        reference_strategy="explicit_reference" if ref_condition else "first_condition",
+    )
+
+    registry = get_default_registry()
+    comparisons = compare_conditions(structures, struct_config, registry=registry)
+    print(f"[Structural] Generated {len(comparisons)} structural comparisons")
+
+    # ------------------------------------------------------------------
+    # Phase 6: Write output tables
+    # ------------------------------------------------------------------
+    print("[Structural] Phase 6: Writing output tables...")
+    tables_dir = run_dir / "tables"
+    try:
+        output_paths = write_structural_tables(
+            tables_dir, structures, comparisons, registry, struct_config,
+            parse_errors=parse_errors,
+        )
+        for name, path in output_paths.items():
+            print(f"[Structural]   {name}: {path}")
+    except Exception as e:
+        return StageResult(
+            name="structural_analysis",
+            status="fail",
+            duration_s=time.time() - t0,
+            message=f"Failed to write structural tables: {e}",
+        )
+
+    elapsed = time.time() - t0
+    print(f"[Structural] Structural analysis completed in {elapsed:.1f}s")
+    print(f"[Structural]   Structures: {len(structures)}")
+    print(f"[Structural]   Comparisons: {len(comparisons)}")
+    print(f"[Structural]   Conditions: {report.n_conditions}")
+    print(f"[Structural]   Parse errors: {report.n_parse_failure}")
+
+    return StageResult(
+        name="structural_analysis",
+        status="pass",
+        duration_s=elapsed,
+        message=(
+            f"Structural analysis: {len(structures)} structures, "
+            f"{len(comparisons)} comparisons, {report.n_parse_failure} parse errors"
+        ),
+        records=len(structures) + len(comparisons),
+    )
+
 
 __all__ = ["StageResult", "PipelineResult", "run_pipeline"]

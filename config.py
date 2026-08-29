@@ -285,6 +285,7 @@ def create_config_interactive(
     permutation_iterations: int = 2000,
     confidence_level: float = 0.95,
     random_seed: int = 42,
+    coordinate_analysis_enabled: bool = False,
     reference_condition: Optional[str] = None,
 ) -> AnalysisConfig:
     """Create a configuration interactively, e.g., from UI prompts.
@@ -303,6 +304,7 @@ def create_config_interactive(
         permutation_iterations=permutation_iterations,
         confidence_level=confidence_level,
         raw_af3_root=Path(raw_af3_root),
+        coordinate_analysis_enabled=coordinate_analysis_enabled,
         reference_condition=reference_condition,
     )
 
