@@ -349,6 +349,7 @@ def run_pipeline(
     -------
     PipelineResult
     """
+    t_start = time.time()
     run_dir = create_run_directory(config)
     pipeline = PipelineResult(output_dir=str(run_dir), run_id=config.run_id)
 
@@ -362,6 +363,8 @@ def run_pipeline(
     # Stage 2 – validation
     s2 = _stage_validate(config, {})
     pipeline.stages.append(s2)
+    if s2.status != "pass":
+        pipeline.errors.append(s2.message)
 
     # Stage 3 – manifest
     s3 = _stage_build_manifest(config, {})
@@ -373,11 +376,15 @@ def run_pipeline(
     # Stage 4 – analysis (placeholder)
     s4 = _stage_run_analysis(Path(run_dir), config)
     pipeline.stages.append(s4)
+    if s4.status != "pass":
+        pipeline.errors.append(s4.message)
 
     # Stage 4b – structural analysis (optional)
     if getattr(config, "coordinate_analysis_enabled", False):
         s4b = _stage_structural_analysis(Path(run_dir), config)
         pipeline.stages.append(s4b)
+        if s4b.status != "pass":
+            pipeline.errors.append(s4b.message)
 
     # Stage 5 – figures
     if getattr(config, "generate_figures", True):
@@ -398,13 +405,18 @@ def run_pipeline(
         pipeline.stages.append(s5)
         if s5.status == "pass":
             pipeline.n_manifest_rows += s5.records
+        if s5.status != "pass":
+            pipeline.errors.append(s5.message)
 
     # Stage 6 – reports
     s6 = _stage_generate_reports(Path(run_dir), pipeline)
     pipeline.stages.append(s6)
+    if s6.status != "pass":
+        pipeline.errors.append(s6.message)
 
-    # Determine overall success
+    # Determine overall success and elapsed time
     pipeline.success = all(st.status == "pass" for st in pipeline.stages)
+    pipeline.elapsed_s = time.time() - t_start
     return pipeline
 
 def _stage_structural_analysis(
