@@ -12,6 +12,7 @@ from typing import Dict, List, Optional, Tuple
 
 import matplotlib
 matplotlib.use("Agg")
+import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import seaborn as sns
 
@@ -45,13 +46,12 @@ FONT_SIZES: Dict[str, int] = {
 # Factor colour palette
 # ---------------------------------------------------------------------------
 
-# PTM state → colour  (4 levels maximum in current design)
-PTM_COLOURS: Dict[str, str] = {
-    "Baseline":   "#4C72B0",   # steel-blue
-    "T101":       "#DD8452",   # warm orange
-    "S102":       "#55A868",   # green
-    "T101 + S102": "#C44E52",  # red
-}
+# ---------------------------------------------------------------------------
+# Factor colour palette (no hardcoded biological names)
+# ---------------------------------------------------------------------------
+
+# Fixed colour for Baseline; all other states get husl colours dynamically
+_BASE_PTM_COLOUR: str = "#4C72B0"  # steel-blue for Baseline
 
 # DNA → line-style / marker
 DNA_STYLE: Dict[bool, Dict[str, str]] = {
@@ -83,8 +83,30 @@ MAX_HEATMAP_CELLS: int = 500
 # Derived helpers
 # ---------------------------------------------------------------------------
 
-PTM_ORDER: List[str] = ["Baseline", "T101", "S102", "T101 + S102"]
 DNA_ORDER: List[bool] = [False, True]
+
+
+def derive_ptm_order(ptm_states: List[str]) -> List[str]:
+    """Return stable ordering: Baseline first, then alphabetical."""
+    others = sorted(s for s in ptm_states if s != "Baseline")
+    return (["Baseline"] + others) if "Baseline" in ptm_states else others
+
+
+def build_ptm_colours(ptm_states: List[str]) -> Dict[str, str]:
+    """Generate a colour map for arbitrary PTM states.
+
+    ``Baseline`` always gets the fixed blue; new states use husl.
+    """
+    palette: Dict[str, str] = {}
+    husl = sns.color_palette("husl", n_colors=max(len(ptm_states), 8))
+    husl_idx = 0
+    for s in ptm_states:
+        if s == "Baseline":
+            palette[s] = _BASE_PTM_COLOUR
+        else:
+            palette[s] = mcolors.to_hex(husl[husl_idx])
+            husl_idx += 1
+    return palette
 
 
 def apply_v2_style() -> None:
@@ -107,13 +129,14 @@ def apply_v2_style() -> None:
     })
 
 
-def get_ptm_color(ptm_state: str) -> str:
-    """Return the canonical colour for a PTM state, falling back to husl."""
-    if ptm_state in PTM_COLOURS:
-        return PTM_COLOURS[ptm_state]
-    # Fallback for unexpected PTM labels
-    idx = PTM_ORDER.index(ptm_state) if ptm_state in PTM_ORDER else 0
-    return sns.color_palette("husl", n_colors=8)[idx % 8]
+def get_ptm_color(ptm_state: str, palette: Optional[Dict[str, str]] = None) -> str:
+    """Return colour for *ptm_state* using *palette* or fallback husl."""
+    if palette and ptm_state in palette:
+        return palette[ptm_state]
+    if ptm_state == "Baseline":
+        return _BASE_PTM_COLOUR
+    idx = abs(hash(ptm_state)) % 8
+    return mcolors.to_hex(sns.color_palette("husl", n_colors=8)[idx])
 
 
 def get_dna_style(has_dna: bool) -> Dict[str, str]:
@@ -121,6 +144,10 @@ def get_dna_style(has_dna: bool) -> Dict[str, str]:
     return DNA_STYLE.get(has_dna, DNA_STYLE[False])
 
 
-def make_ptm_palette() -> Dict[str, str]:
-    """Return the ordered PTM colour mapping for seaborn."""
-    return {k: PTM_COLOURS[k] for k in PTM_ORDER if k in PTM_COLOURS}
+def make_ptm_palette(ptm_states: Optional[List[str]] = None) -> Dict[str, str]:
+    """Return ordered colour mapping for the given *ptm_states*.
+
+    If *ptm_states* is ``None``, falls back to ``["Baseline"]``.
+    """
+    states = ptm_states if ptm_states else ["Baseline"]
+    return build_ptm_colours(derive_ptm_order(states))

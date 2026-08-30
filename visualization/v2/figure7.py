@@ -30,8 +30,9 @@ import seaborn as sns
 
 from .config import (
     DPI, DOUBLE_COL_WIDTH, FONT_SIZES, MAX_FIGURE_HEIGHT_INCHES,
-    PTM_COLOURS, PTM_ORDER, DNA_ORDER, DNA_STYLE, SEED_STYLE,
+    DNA_ORDER, DNA_STYLE, SEED_STYLE,
     apply_v2_style, get_ptm_color, get_dna_style, make_ptm_palette,
+    derive_ptm_order,
 )
 from .factors import add_factor_columns, get_unique_ptm_states, get_unique_environments
 from .labels import (
@@ -97,7 +98,7 @@ def generate_figure7(
         axes = [axes]
 
     palette = make_ptm_palette()
-    ptm_states = [p for p in PTM_ORDER if p in df["ptm_state"].unique()]
+    ptm_states = derive_ptm_order(df["ptm_state"].unique().tolist())
 
     warnings_list: List[str] = []
     total_obs = 0
@@ -123,7 +124,8 @@ def generate_figure7(
 
     # --- Legend ---
     # Build a combined legend: PTM colours + DNA line styles
-    _add_combined_legend(fig, ptm_states, list(DNA_STYLE.keys()))
+    palette = make_ptm_palette(ptm_states)
+    _add_combined_legend(fig, ptm_states, list(DNA_STYLE.keys()), palette=palette)
 
     fig.suptitle(
         figure_title("fig7"),
@@ -212,7 +214,7 @@ def _plot_ranking_box(ax, df, metric, palette, ptm_states, label):
     ax.tick_params(axis="x", rotation=20, labelsize=FONT_SIZES["tick_label"])
 
 
-def _add_combined_legend(fig, ptm_states, dna_values):
+def _add_combined_legend(fig, ptm_states, dna_values, palette=None):
     """Create a two-part legend: PTM colours + DNA line styles."""
     from matplotlib.lines import Line2D
     handles = []
@@ -222,7 +224,7 @@ def _add_combined_legend(fig, ptm_states, dna_values):
     handles.append(Line2D([0], [0], color="white", linewidth=0))
     labels.append("PTM State")
     for ptm in ptm_states:
-        c = PTM_COLOURS.get(ptm, "grey")
+        c = palette.get(ptm, "grey") if palette else "grey"
         handles.append(Line2D([0], [0], color=c, linewidth=2.5))
         labels.append(ptm)
 

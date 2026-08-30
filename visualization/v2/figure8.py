@@ -27,8 +27,9 @@ import pandas as pd
 import seaborn as sns
 
 from .config import (
-    DPI, FONT_SIZES, MAX_FIGURE_HEIGHT_INCHES, PTM_COLOURS, PTM_ORDER,
+    DPI, FONT_SIZES, MAX_FIGURE_HEIGHT_INCHES,
     DNA_ORDER, DNA_STYLE, SEED_STYLE, apply_v2_style, make_ptm_palette,
+    derive_ptm_order,
 )
 from .factors import add_factor_columns, get_unique_ptm_states
 from .labels import FIGURE8_METRICS, metric_label, figure_title
@@ -77,9 +78,9 @@ def generate_figure8(
     if len(available) < 2:
         return {"status": "skip", "reason": f"Need ≥2 metrics, got {len(available)}"}
 
-    ptm_states = [p for p in PTM_ORDER if p in df["ptm_state"].unique()]
+    ptm_states = derive_ptm_order(df["ptm_state"].unique().tolist())
     n_ptm = len(ptm_states)
-    palette = make_ptm_palette()
+    palette = make_ptm_palette(ptm_states)
 
     # --- Build the pairplot ---
     # Create a short "DNA label" column for the marker encoding
