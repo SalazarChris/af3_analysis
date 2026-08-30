@@ -545,6 +545,13 @@ def _stage_structural_analysis(
         if (i + 1) % 50 == 0 or (i + 1) == n_total:
             print(f"[Structural]   Parsed {i + 1}/{n_total}")
 
+    # Print first few parse errors for debugging
+    if parse_errors and len(parse_errors) <= 5:
+        for err in parse_errors:
+            print(f"[Structural]   PARSE ERROR: {err['condition_id']} s{err['seed']} m{err['sample']}: {err['reason'][:200]}")
+    elif parse_errors:
+        print(f"[Structural]   First parse error: {parse_errors[0]['reason'][:200]}")
+
     report.n_parse_success = len(structures)
     report.n_parse_failure = len(parse_errors)
     report.parse_errors = parse_errors
