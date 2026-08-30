@@ -44,17 +44,17 @@ def _compute_contact_set(
         centres[key] = np.mean(coords, axis=0)
 
     keys = sorted(centres.keys())
-    contacts = set()
+    n = len(keys)
+    if n < 2:
+        return set()
 
-    for i, key_i in enumerate(keys):
-        for j, key_j in enumerate(keys[i + 1:], start=i + 1):
-                ci = centres[key_i]
-                cj = centres[key_j]
-                dist = np.sqrt(np.sum((ci - cj) ** 2))
-                if dist < cutoff:
-                    contacts.add((i, j))
+    coords = np.array([centres[k] for k in keys])
+    from scipy.spatial.distance import pdist
+    dists = pdist(coords)
+    mask = dists < cutoff
 
-    return contacts
+    rows, cols = np.triu_indices(n, k=1)
+    return set(zip(rows[mask].tolist(), cols[mask].tolist()))
 
 
 class ContactMapDifference(StructuralMetric):
@@ -160,14 +160,18 @@ class InterfaceContactCount(StructuralMetric):
 
             centres = {k: np.mean(v, axis=0) for k, v in residue_coords.items()}
             keys = sorted(centres.keys())
-            count = 0
-            for i, ki in enumerate(keys):
-                for kj in keys[i + 1:]:
-                    if ki[0] != kj[0]:  # different chains
-                        dist = np.sqrt(np.sum((centres[ki] - centres[kj]) ** 2))
-                        if dist < cutoff:
-                            count += 1
-            return count
+            n = len(keys)
+            if n < 2:
+                return 0
+
+            coords = np.array([centres[k] for k in keys])
+            chain_arr = np.array([k[0] for k in keys])
+
+            from scipy.spatial.distance import pdist
+            dists = pdist(coords)
+            rows, cols = np.triu_indices(n, k=1)
+            inter_chain = chain_arr[rows] != chain_arr[cols]
+            return int(np.sum((dists < cutoff) & inter_chain))
 
         count_a = _inter_chain_contacts(structure_a, contact_cutoff)
         count_b = _inter_chain_contacts(structure_b, contact_cutoff)
