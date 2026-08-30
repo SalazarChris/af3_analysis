@@ -458,6 +458,18 @@ def _stage_structural_analysis(
             message=f"Structural analysis dependencies missing: {e}",
         )
 
+    # Check gemmi (required for mmCIF parsing, imported lazily in structure_reader)
+    try:
+        import gemmi
+    except ImportError:
+        return StageResult(
+            name="structural_analysis",
+            status="fail",
+            duration_s=time.time() - t0,
+            message="Structural analysis requires 'gemmi' package for mmCIF parsing. "
+                     "Install with: pip install gemmi",
+        )
+
     raw_root = getattr(config, "raw_af3_root", None)
     if raw_root is None:
         return StageResult(
