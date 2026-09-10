@@ -21,3 +21,7 @@ build/
 
 # Secrets / env
 .env
+
+# Demoted nested git repositories (kept on disk for reversibility, not tracked)
+.git.nested-backup/
+
