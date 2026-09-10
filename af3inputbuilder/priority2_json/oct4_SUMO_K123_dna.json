@@ -1,0 +1,59 @@
+{
+  "name": "OCT4 + K123-SUMO + DNA",
+  "modelSeeds": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10
+  ],
+  "sequences": [
+    {
+      "protein": {
+        "id": "A",
+        "sequence": "MAGHLASDFAFSPPPGGGGDGPGGPEPGWVDPRTWLSFQGPPGGPGIGPGVGPGSEVWGIPPCPPPYEFCGGMAYCGPQVGVGLVPQGGLETSQPEGEAGVGVESNSDGASPEPCTVTPGAVKLEKEKLEQNPEESQDIKALQKELEQFAKLLKQKRITLGYTQADVGLTLGVLFGKVFSQTTICRFEALQLSFKNMCKLRPLLQKWVEEADNNENLQEICKAETLVQARKRKRTSIENRVRGNLENLFLQCPKPTLQQISHIAQQLGLEKDVVRVWFCNRRQKGKRSSSDYAQREDFEAAGSPFSGGPVSFPLAPGPHFGTPGYGSPHFTALYSSVPFPEGEAFPPVSVTTLGSPMHSN"
+      }
+    },
+    {
+      "protein": {
+        "id": "B",
+        "sequence": "MSDQEAKPSTEDLGDKKEGEYIKLKVIGQDSSEIHFKVKMTTHLKKLKESYCQRQGVPMNSLRFLFEGQRIADNHTPKELGMEEEDVIEVYQEQTGGHSTV"
+      }
+    },
+    {
+      "dna": {
+        "id": "C",
+        "sequence": "GGATGCAAAGAAAGAATGTCATACGTTTGAATGTCAT"
+      }
+    },
+    {
+      "ligand": {
+        "id": "D",
+        "ccdCodes": [
+          "MG"
+        ]
+      }
+    }
+  ],
+  "bondedAtomPairs": [
+    [
+      [
+        "A",
+        123,
+        "NZ"
+      ],
+      [
+        "B",
+        97,
+        "C"
+      ]
+    ]
+  ],
+  "dialect": "alphafold3",
+  "version": 1
+}

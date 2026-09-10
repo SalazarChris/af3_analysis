@@ -1,0 +1,13 @@
+dataset,condition_id,category,description,seed,generated_json,entity_count,protein_count,dna_count,ligand_count,ion_count,mod_count,bond_count,prevalidation_status,execution_status,af3_status,error_type,error_message,timestamp
+pou2,pou_baseline,A,Unmodified protein (baseline),1,json\pou_baseline_seed1.json,2,1,0,1,0,0,0,PASSED,GENERATED_NOT_SUBMITTED,AF3_EXECUTION_NOT_ATTEMPTED,,,2026-08-26T19:34:13.143817+00:00
+pou2,pou_tpo101,B,Protein + 1 verified PTM (pTPO101),1,json\pou_tpo101_seed1.json,2,1,0,1,0,1,0,PASSED,GENERATED_NOT_SUBMITTED,AF3_EXECUTION_NOT_ATTEMPTED,,,2026-08-26T19:34:13.152101+00:00
+pou2,pou_tpo101_sep102,C,Protein + 2 verified PTMs (pTPO101 + pSEP102),1,json\pou_tpo101_sep102_seed1.json,2,1,0,1,0,2,0,PASSED,GENERATED_NOT_SUBMITTED,AF3_EXECUTION_NOT_ATTEMPTED,,,2026-08-26T19:34:13.156687+00:00
+pou2,pou_dna,D,Protein + DNA,1,json\pou_dna_seed1.json,3,1,1,1,0,0,0,PASSED,GENERATED_NOT_SUBMITTED,AF3_EXECUTION_NOT_ATTEMPTED,,,2026-08-26T19:34:13.165395+00:00
+pou2,pou_tpo101_dna,E,Protein + PTM + DNA,1,json\pou_tpo101_dna_seed1.json,3,1,1,1,0,1,0,PASSED,GENERATED_NOT_SUBMITTED,AF3_EXECUTION_NOT_ATTEMPTED,,,2026-08-26T19:34:13.170072+00:00
+pou2,pou_tpo101_sep102_dna,E_extended,Protein + 2 PTMs + DNA (bonus),1,json\pou_tpo101_sep102_dna_seed1.json,3,1,1,1,0,2,0,PASSED,GENERATED_NOT_SUBMITTED,AF3_EXECUTION_NOT_ATTEMPTED,,,2026-08-26T19:34:13.174083+00:00
+pou2,pou_baseline,G,"Protein + ion (MG, from baseline)",1,json\pou_baseline_seed1.json,2,1,0,1,0,0,0,PASSED,GENERATED_NOT_SUBMITTED,AF3_EXECUTION_NOT_ATTEMPTED,,,2026-08-26T19:34:13.177647+00:00
+protein_x,kinase_baseline,A_px,Protein-X baseline (genericity check),1,json\kinase_baseline_seed1.json,2,1,0,1,0,0,0,PASSED,GENERATED_NOT_SUBMITTED,AF3_EXECUTION_NOT_ATTEMPTED,,,2026-08-26T19:34:13.194232+00:00
+protein_x,kinase_ligand_A,F,Protein + ligand (ATP),1,json\kinase_ligand_A_seed1.json,3,1,0,2,0,0,0,PASSED,GENERATED_NOT_SUBMITTED,AF3_EXECUTION_NOT_ATTEMPTED,,,2026-08-26T19:34:13.197843+00:00
+protein_x,kinase_phospho,B_px,Protein-X + PTM (phospho_K42),1,json\kinase_phospho_seed1.json,2,1,0,1,0,1,0,PASSED,GENERATED_NOT_SUBMITTED,AF3_EXECUTION_NOT_ATTEMPTED,,,2026-08-26T19:34:13.200780+00:00
+protein_x,kinase_phospho_ligand,H,Protein + PTM + ligand,1,json\kinase_phospho_ligand_seed1.json,3,1,0,2,0,1,0,PASSED,GENERATED_NOT_SUBMITTED,AF3_EXECUTION_NOT_ATTEMPTED,,,2026-08-26T19:34:13.204343+00:00
+protein_x,kinase_multi,H_extended,Protein + 2 PTMs + ligand (bonus),1,json\kinase_multi_seed1.json,3,1,0,2,0,2,0,PASSED,GENERATED_NOT_SUBMITTED,AF3_EXECUTION_NOT_ATTEMPTED,,,2026-08-26T19:34:13.207895+00:00

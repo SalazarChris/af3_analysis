@@ -1,0 +1,30 @@
+{
+  "name": "POU (pTPO101 + pSEP102)",
+  "modelSeeds": [1],
+  "sequences": [
+    {
+      "protein": {
+        "id": "A",
+        "sequence": "RKRKKRTTIETQNVAALKEFEENTFKHRICYIDNKRGGNLTVYHGQNPLNEFQAALKDSPPMAVIEELDPGRYLHVPYLGHPESSSGPAGSQALGPALLGLVPLGAGGAAAVEPEGSQVLAALAK",
+        "modifications": [
+          {
+            "ccdCode": "TPO",
+            "position": 101
+          },
+          {
+            "ccdCode": "SEP",
+            "position": 102
+          }
+        ]
+      }
+    },
+    {
+      "ligand": {
+        "id": "B",
+        "ccdCodes": ["MG"]
+      }
+    }
+  ],
+  "dialect": "alphafold3",
+  "version": 1
+}

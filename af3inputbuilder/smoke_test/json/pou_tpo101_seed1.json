@@ -1,0 +1,26 @@
+{
+  "name": "POU (pTPO101)",
+  "modelSeeds": [1],
+  "sequences": [
+    {
+      "protein": {
+        "id": "A",
+        "sequence": "RKRKKRTTIETQNVAALKEFEENTFKHRICYIDNKRGGNLTVYHGQNPLNEFQAALKDSPPMAVIEELDPGRYLHVPYLGHPESSSGPAGSQALGPALLGLVPLGAGGAAAVEPEGSQVLAALAK",
+        "modifications": [
+          {
+            "ccdCode": "TPO",
+            "position": 101
+          }
+        ]
+      }
+    },
+    {
+      "ligand": {
+        "id": "B",
+        "ccdCodes": ["MG"]
+      }
+    }
+  ],
+  "dialect": "alphafold3",
+  "version": 1
+}

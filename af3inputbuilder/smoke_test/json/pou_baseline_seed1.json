@@ -1,0 +1,20 @@
+{
+  "name": "Baseline (POU)",
+  "modelSeeds": [1],
+  "sequences": [
+    {
+      "protein": {
+        "id": "A",
+        "sequence": "RKRKKRTTIETQNVAALKEFEENTFKHRICYIDNKRGGNLTVYHGQNPLNEFQAALKDSPPMAVIEELDPGRYLHVPYLGHPESSSGPAGSQALGPALLGLVPLGAGGAAAVEPEGSQVLAALAK"
+      }
+    },
+    {
+      "ligand": {
+        "id": "B",
+        "ccdCodes": ["MG"]
+      }
+    }
+  ],
+  "dialect": "alphafold3",
+  "version": 1
+}

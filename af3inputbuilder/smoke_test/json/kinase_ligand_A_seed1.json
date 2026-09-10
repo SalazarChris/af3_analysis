@@ -1,0 +1,26 @@
+{
+  "name": "Kinase X + ATP",
+  "modelSeeds": [1],
+  "sequences": [
+    {
+      "protein": {
+        "id": "A",
+        "sequence": "MKKSSRAGVLFSTIKERHPLPKPDVVLFPEGSWDDHEIIDLLHRDFEKLGLYKCHPSGTIFMYPPILLPDKKSEKYPTLGIAHLLQQGTPVLAALHVSPKFYGLTKNLLIPIDFYTEINFNKFSYFPNVFLEQYKKMDYYTSLYPSNIEKGNYTLELDEDAVQPFIFPFKSELSFQDYESYETDLLAQLKTLFLNKLGFQGLVYALLTLTNLRGKYYMLRDLKFLHMLITHPKLHQLLKNLKILGRFKMPTLAELLAQKPQHPQHTHTHQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ"
+      }
+    },
+    {
+      "ligand": {
+        "id": "B",
+        "ccdCodes": ["ATP"]
+      }
+    },
+    {
+      "ligand": {
+        "id": "C",
+        "ccdCodes": ["MG"]
+      }
+    }
+  ],
+  "dialect": "alphafold3",
+  "version": 1
+}
