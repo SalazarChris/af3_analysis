@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -313,6 +313,77 @@ def _stage_generate_figures(
             message=str(e),
         )
 
+def _stage_v3_visualization(
+    run_dir: Path,
+    *,
+    raw_af3_root: Optional[Path] = None,
+    metadata_path: Optional[str] = None,
+    reference_condition: Optional[str] = None,
+) -> StageResult:
+    """Run the V3 structural visualization pipeline inside <run_dir>/v3/.
+
+    V3 is additive: it only reads existing pipeline outputs (tables/) and
+    raw AF3 structures, and writes exclusively under <run_dir>/v3/.
+    """
+    t0 = time.time()
+    try:
+        from af3_analysis.visualization_v3.runner import run_v3_pipeline
+        from af3_analysis.visualization_v3.config import V3Config
+
+        v3_config = V3Config()
+        if reference_condition:
+            v3_config = replace(
+                v3_config, reference={"condition": reference_condition}
+            )
+
+        results = run_v3_pipeline(
+            run_dir,
+            raw_af3_root=raw_af3_root,
+            experiment_metadata_path=(
+                Path(metadata_path) if metadata_path else None
+            ),
+            v3_config=v3_config,
+        )
+
+        status = results.get("status", "unknown")
+        if status in ("complete", "completed_with_errors"):
+            summary = results.get("summary", {})
+            n_err = len(results.get("errors", []))
+            message = (
+                f"V3: {summary.get('n_figures_success', 0)} figures, "
+                f"{summary.get('n_figures_skipped', 0)} skipped"
+            )
+            if n_err:
+                message += f", {n_err} errors"
+            return StageResult(
+                name="v3_visualization",
+                status="pass",
+                duration_s=time.time() - t0,
+                message=message,
+                records=summary.get("n_figures_success", 0),
+            )
+        if status == "disabled":
+            return StageResult(
+                name="v3_visualization",
+                status="pass",
+                duration_s=time.time() - t0,
+                message="V3 disabled in config",
+            )
+        return StageResult(
+            name="v3_visualization",
+            status="fail",
+            duration_s=time.time() - t0,
+            message=f"V3 pipeline status: {status}; "
+                    f"errors: {results.get('errors', [])[:3]}",
+        )
+    except Exception as e:
+        return StageResult(
+            name="v3_visualization",
+            status="fail",
+            duration_s=time.time() - t0,
+            message=str(e),
+        )
+
 def _stage_generate_reports(output_dir: Path, result: PipelineResult) -> StageResult:
     # Minimal placeholder implementation.
     return StageResult(
@@ -332,6 +403,7 @@ def run_pipeline(
     save_summary_json: bool = False,
     visualization_version: str = "both",
     environment_filter: Optional[str] = None,
+    v3_enabled: bool = True,
 ) -> PipelineResult:
     """Execute the full AF3 analysis pipeline.
 
@@ -348,6 +420,9 @@ def run_pipeline(
         figures, ``"both"`` for both.  Default is ``"both"``.
     environment_filter : str, optional
         Restrict V2 to a single environment.
+    v3_enabled : bool
+        Run the V3 structural visualization stage after V1/V2 figures
+        (requires ``config.coordinate_analysis_enabled``). Default True.
 
     Returns
     -------
@@ -390,16 +465,16 @@ def run_pipeline(
         if s4b.status != "pass":
             pipeline.errors.append(s4b.message)
 
+    # Resolve metadata path for V2/V3 (used by figure stages)
+    meta_path = None
+    raw_root = getattr(config, "raw_af3_root", None)
+    if raw_root is not None:
+        candidate = Path(raw_root) / "experiment_metadata.json"
+        if candidate.is_file():
+            meta_path = str(candidate)
+
     # Stage 5 – figures
     if getattr(config, "generate_figures", True):
-        # Resolve metadata path for V2
-        meta_path = None
-        raw_root = getattr(config, "raw_af3_root", None)
-        if raw_root is not None:
-            candidate = Path(raw_root) / "experiment_metadata.json"
-            if candidate.is_file():
-                meta_path = str(candidate)
-
         s5 = _stage_generate_figures(
             Path(run_dir),
             visualization_version=visualization_version,
@@ -412,6 +487,23 @@ def run_pipeline(
             pipeline.n_manifest_rows += s5.records
         if s5.status != "pass":
             pipeline.errors.append(s5.message)
+
+    # Stage 5b – V3 structural visualization (optional, additive)
+    if v3_enabled and getattr(config, "coordinate_analysis_enabled", False):
+        s5b = _stage_v3_visualization(
+            Path(run_dir),
+            raw_af3_root=(
+                Path(config.raw_af3_root)
+                if getattr(config, "raw_af3_root", None) else None
+            ),
+            metadata_path=meta_path,
+            reference_condition=config.reference_condition,
+        )
+        pipeline.stages.append(s5b)
+        if s5b.status == "pass" and s5b.records:
+            pipeline.n_manifest_rows += s5b.records
+        if s5b.status != "pass":
+            pipeline.errors.append(s5b.message)
 
     # Stage 6 – reports
     s6 = _stage_generate_reports(Path(run_dir), pipeline)

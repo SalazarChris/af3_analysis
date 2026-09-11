@@ -178,6 +178,18 @@ def run_complete_analysis_pipeline():
         else:
             print(f"  {YELLOW}No conditions with CIF files found. Structural analysis may not produce results.{RESET}")
 
+    # ------------------------------------------------------------------
+    # Step 6: V3 Structural Visualization (optional)
+    # ------------------------------------------------------------------
+    v3_enabled = False
+    if coordinate_analysis_enabled:
+        print()
+        print(f"  {CYAN}Step 6:{RESET} V3 Structural Visualization")
+        print(f"  {DIM}Add-on suite: global/per-residue geometry, contact-map and{RESET}")
+        print(f"  {DIM}interface changes, structural clustering, confidence-vs-{RESET}")
+        print(f"  {DIM}geometry integration. Writes to <run>/v3/.{RESET}")
+        v3_enabled = _ask_yn("Enable V3 structural visualization?", default=True)
+
     print()
     if not _ask_yn("Run complete pipeline now?", default=True):
         print(f"  {YELLOW}Cancelled.{RESET}")
@@ -222,6 +234,7 @@ def run_complete_analysis_pipeline():
             config=config,
             save_raw_json=save_raw_json,
             save_summary_json=save_summary_json,
+            v3_enabled=v3_enabled,
         )
 
         print()
