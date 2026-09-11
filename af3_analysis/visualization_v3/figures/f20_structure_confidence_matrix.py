@@ -131,7 +131,7 @@ def generate_f20_structure_confidence_matrix(
             )
 
             # Correlation
-            if len(x_vals) > 2:
+            if len(x_vals) > 2 and np.ptp(np.asarray(x_vals)) > 0:
                 corr, p_val = stats.pearsonr(x_vals, y_vals)
                 ax.text(
                     0.05, 0.95,
@@ -147,6 +147,17 @@ def generate_f20_structure_confidence_matrix(
                 x_line = np.linspace(x_vals.min(), x_vals.max(), 100)
                 y_line = slope * x_line + intercept
                 ax.plot(x_line, y_line, color="red", linewidth=1, linestyle="--", alpha=0.5)
+            elif len(x_vals) > 2:
+                # Zero-variance metric (e.g. constant pLDDT): correlation
+                # and regression are undefined. Annotate instead of crashing.
+                ax.text(
+                    0.05, 0.95,
+                    "r = n/a\n(constant x)",
+                    transform=ax.transAxes,
+                    fontsize=8,
+                    verticalalignment="top",
+                    bbox=dict(boxstyle="round", facecolor="white", alpha=0.8),
+                )
 
             ax.set_xlabel(conf_metric, fontsize=8)
             ax.set_ylabel(struct_metric, fontsize=8)

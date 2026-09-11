@@ -70,6 +70,7 @@ def analyze_matched_seeds(
     min_common_atoms: int = 3,
     min_coverage: float = 0.80,
     min_sequence_identity: float = 0.5,
+    rmsd_cache: Optional[Dict[Any, Any]] = None,
 ) -> List[MatchedSeedResult]:
     """
     Run matched-seed structural analysis between two conditions.
@@ -85,6 +86,12 @@ def analyze_matched_seeds(
     min_common_atoms : int
     min_coverage : float
     min_sequence_identity : float
+    rmsd_cache : dict, optional
+        Shared (target_pid, ref_pid) -> (rmsd, coverage, status) cache from
+        the runner's FigureDataCache. When provided, per-pair RMSDs already
+        computed for other figures are reused instead of recalculated, and
+        results computed here are stored back. Cache entries are written in
+        the same argument order as ``calculate_rmsd``.
 
     Returns
     -------
@@ -132,6 +139,26 @@ def analyze_matched_seeds(
             for target_struct in target_samples.values():
                 n_comparisons += 1
 
+                cache_key = None
+                if rmsd_cache is not None:
+                    cache_key = (
+                        target_struct.prediction_id, ref_struct.prediction_id
+                    )
+                    if cache_key in rmsd_cache:
+                        cached_rmsd, cached_coverage, cached_status = (
+                            rmsd_cache[cache_key]
+                        )
+                        if (
+                            cached_status == "comparable"
+                            and cached_rmsd is not None
+                        ):
+                            rmsd_values.append(cached_rmsd)
+                            coverage_values.append(cached_coverage)
+                            n_valid += 1
+                        else:
+                            n_incomparable += 1
+                        continue
+
                 # Import RMSD calculation
                 from ..structural.rmsd import calculate_rmsd
 
@@ -143,6 +170,11 @@ def analyze_matched_seeds(
                     min_sequence_identity=min_sequence_identity,
                     min_coverage=min_coverage,
                 )
+
+                if rmsd_cache is not None and cache_key is not None:
+                    rmsd_cache[cache_key] = (
+                        result["rmsd"], result["coverage"], result["status"]
+                    )
 
                 if result["status"] == "comparable" and result["rmsd"] is not None:
                     rmsd_values.append(result["rmsd"])

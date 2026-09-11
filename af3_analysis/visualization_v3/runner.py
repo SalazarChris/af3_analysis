@@ -30,7 +30,7 @@ import traceback
 from datetime import datetime, timezone
 from itertools import product
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -161,6 +161,11 @@ def run_v3_pipeline(
         "errors": [],
         "skipped": [],
     }
+
+    # Cross-figure cache: shares RMSD/displacement/contact/interface/region
+    # calculations between figures and tables within this run (see
+    # FigureDataCache for keying and scope guarantees).
+    figure_cache = FigureDataCache()
 
     # Phase 1: Adapt dataset from pipeline
     logger.info("[V3] Phase 1: Adapting dataset from pipeline")
@@ -328,6 +333,7 @@ def run_v3_pipeline(
                 ref_resolution,
                 v3_config,
                 v3_figures_dir,
+                figure_cache,
             )
 
             results["figures"][fig_id] = fig_result
@@ -370,10 +376,24 @@ def run_v3_pipeline(
             v3_config,
             v3_tables_dir,
             results,
+            figure_cache,
         )
     except Exception as e:
         logger.error("[V3] Table generation failed: %s", e)
         results["errors"].append(f"Table generation failed: {e}")
+
+    # Record cross-figure cache usage for provenance (hit/miss tally and
+    # entry counts; the cache itself is per-run and not persisted).
+    results["figure_cache"] = figure_cache.as_summary()
+    logger.info(
+        "[V3] Cross-figure cache: %d hits, %d misses (entries: %s)",
+        figure_cache.n_hits,
+        figure_cache.n_misses,
+        {
+            k: v for k, v in figure_cache.as_summary().items()
+            if k.endswith("_entries") and v > 0
+        },
+    )
 
     # Finalize results summary and status
     elapsed = time.time() - results["start_time"]
@@ -445,13 +465,259 @@ def _get_reference_structure(
     return dataset.predictions.get(ref_condition, {}).get(seed, {}).get(sample)
 
 
+# ---------------------------------------------------------------------------
+# Cross-figure structural calculation cache
+# ---------------------------------------------------------------------------
+
+class FigureDataCache:
+    """Per-run cache of structural calculations shared across figures/tables.
+
+    Several figures recompute identical quantities (F02/F04/F06/F08 duplicate
+    what F15/F05/F07/F09 and the output tables need). Entries are keyed by
+    prediction identity in the same argument order as the underlying call, so
+    a cache hit returns exactly what recomputation would.
+
+    The cache assumes a single V3Config per run: alignment/coverage parameters
+    are identical for all consumers within a run and are therefore not part of
+    the keys. The contact distance *is* embedded in the interface cache key
+    because it selects which contacts exist.
+    """
+
+    def __init__(self) -> None:
+        # (target_pid, ref_pid) -> (rmsd, coverage, status)
+        self.rmsd: Dict[Tuple[str, str], Tuple[Optional[float], float, str]] = {}
+        # (ref_pid, target_pid) -> displacement result dict
+        self.displacement: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        # (ref_pid, target_pid) -> scalar contact-difference summary
+        # (full delta maps stay ephemeral to their computing figure so memory
+        # does not grow with the number of comparisons)
+        self.contact_diff_summary: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        # (pid, contact_distance) -> list of InterfaceContacts
+        self.interfaces: Dict[Tuple[str, float], List[Any]] = {}
+        # ("matched_seed", ref_condition, condition_id) -> list of results
+        self.matched_seed: Dict[Tuple[str, str, str], List[Any]] = {}
+        # (pid, ref_pid, definition_json) -> RegionResult
+        self.local_geometry: Dict[Tuple[str, str, str], Any] = {}
+        self.n_hits = 0
+        self.n_misses = 0
+
+    def as_summary(self) -> Dict[str, int]:
+        """Entry counts + hit/miss tally for the run manifest."""
+        return {
+            "rmsd_entries": len(self.rmsd),
+            "displacement_entries": len(self.displacement),
+            "contact_diff_summary_entries": len(self.contact_diff_summary),
+            "interface_entries": len(self.interfaces),
+            "matched_seed_entries": len(self.matched_seed),
+            "local_geometry_entries": len(self.local_geometry),
+            "hits": self.n_hits,
+            "misses": self.n_misses,
+        }
+
+
+def _cached_rmsd(
+    cache: Optional[FigureDataCache],
+    target_struct: Any,
+    ref_struct: Any,
+    v3_config: V3Config,
+) -> Tuple[Optional[float], float, str]:
+    """RMSD-to-reference with caching, keyed (target, ref).
+
+    Returns (rmsd, coverage, status) exactly as produced by
+    ``calculate_rmsd``; rmsd None means the comparison was not computable.
+    A None cache computes directly (no reuse).
+    """
+    if cache is None:
+        result = calculate_rmsd(
+            target_struct,
+            ref_struct,
+            alignment_atom=v3_config.structure.alignment_atom,
+            min_common_atoms=v3_config.structure.min_common_atoms,
+            min_sequence_identity=v3_config.structure.min_sequence_identity,
+            min_coverage=v3_config.structure.minimum_coverage,
+        )
+        return result["rmsd"], result["coverage"], result["status"]
+    key = (target_struct.prediction_id, ref_struct.prediction_id)
+    if key in cache.rmsd:
+        cache.n_hits += 1
+        return cache.rmsd[key]
+    cache.n_misses += 1
+    result = calculate_rmsd(
+        target_struct,
+        ref_struct,
+        alignment_atom=v3_config.structure.alignment_atom,
+        min_common_atoms=v3_config.structure.min_common_atoms,
+        min_sequence_identity=v3_config.structure.min_sequence_identity,
+        min_coverage=v3_config.structure.minimum_coverage,
+    )
+    value = (result["rmsd"], result["coverage"], result["status"])
+    cache.rmsd[key] = value
+    return value
+
+
+def _cached_displacement(
+    cache: Optional[FigureDataCache],
+    ref_struct: Any,
+    target_struct: Any,
+    v3_config: V3Config,
+) -> Dict[str, Any]:
+    """Per-residue displacement with caching, keyed (ref, target).
+
+    A None cache computes directly (no reuse). The returned dict is shared
+    between consumers; callers must not mutate it.
+    """
+    if cache is None:
+        return calculate_per_residue_displacement(
+            ref_struct,
+            target_struct,
+            alignment_atom=v3_config.structure.alignment_atom,
+        )
+    key = (ref_struct.prediction_id, target_struct.prediction_id)
+    if key in cache.displacement:
+        cache.n_hits += 1
+        return cache.displacement[key]
+    cache.n_misses += 1
+    disp = calculate_per_residue_displacement(
+        ref_struct,
+        target_struct,
+        alignment_atom=v3_config.structure.alignment_atom,
+    )
+    cache.displacement[key] = disp
+    return disp
+
+
+def _contact_diff_summary_keys() -> Tuple[str, ...]:
+    return (
+        "n_gained", "n_lost", "n_unchanged", "n_total",
+        "pct_changed", "ref_n_contacts", "target_n_contacts",
+    )
+
+
+def _full_contact_diff(
+    cache: Optional[FigureDataCache],
+    ref_struct: Any,
+    target_struct: Any,
+    v3_config: V3Config,
+) -> Dict[str, Any]:
+    """Full contact-map difference (delta maps included) for F06.
+
+    Populates the shared scalar summary cache so F07 and the tables can
+    reuse this comparison without recomputing the contact maps.
+    """
+    ref_map = calculate_contact_map(
+        ref_struct, threshold=v3_config.structure.contact_distance)
+    target_map = calculate_contact_map(
+        target_struct, threshold=v3_config.structure.contact_distance)
+    diff = calculate_contact_difference(ref_map, target_map)
+    if cache is not None:
+        key = (ref_struct.prediction_id, target_struct.prediction_id)
+        if key not in cache.contact_diff_summary:
+            cache.contact_diff_summary[key] = {
+                k: diff[k] for k in _contact_diff_summary_keys()
+            }
+    return diff
+
+
+def _cached_contact_diff_summary(
+    cache: Optional[FigureDataCache],
+    ref_struct: Any,
+    target_struct: Any,
+    v3_config: V3Config,
+) -> Dict[str, Any]:
+    """Scalar contact-change summary with caching, keyed (ref, target).
+
+    Returns a fresh dict each call so callers can annotate (e.g. add
+    ``condition``) without mutating the cached entry. A None cache computes
+    directly (no reuse).
+    """
+    if cache is None:
+        ref_map = calculate_contact_map(
+            ref_struct, threshold=v3_config.structure.contact_distance)
+        target_map = calculate_contact_map(
+            target_struct, threshold=v3_config.structure.contact_distance)
+        diff = calculate_contact_difference(ref_map, target_map)
+        return {k: diff[k] for k in _contact_diff_summary_keys()}
+    key = (ref_struct.prediction_id, target_struct.prediction_id)
+    if key in cache.contact_diff_summary:
+        cache.n_hits += 1
+        return dict(cache.contact_diff_summary[key])
+    cache.n_misses += 1
+    diff = _full_contact_diff(cache, ref_struct, target_struct, v3_config)
+    return {k: diff[k] for k in _contact_diff_summary_keys()}
+
+
+def _cached_interfaces(
+    cache: Optional[FigureDataCache],
+    structure: Any,
+    v3_config: V3Config,
+) -> List[Any]:
+    """All interfaces of one structure with caching, keyed (pid, distance).
+
+    A None cache computes directly (no reuse). The returned list is shared
+    between consumers; callers must not mutate it.
+    """
+    if cache is None:
+        return find_all_interfaces(
+            structure, threshold=v3_config.structure.contact_distance)
+    key = (structure.prediction_id, v3_config.structure.contact_distance)
+    if key in cache.interfaces:
+        cache.n_hits += 1
+        return cache.interfaces[key]
+    cache.n_misses += 1
+    ifaces = find_all_interfaces(
+        structure, threshold=v3_config.structure.contact_distance)
+    cache.interfaces[key] = ifaces
+    return ifaces
+
+
+def _cached_local_geometry(
+    cache: Optional[FigureDataCache],
+    structure: Any,
+    definition: Dict[str, Any],
+    reference_structure: Optional[Any],
+    alignment_atom: str,
+) -> Any:
+    """Local region geometry with caching, keyed (pid, ref_pid, definition).
+
+    The reference is part of the key because it determines local_rmsd.
+    A None cache computes directly (no reuse). The returned RegionResult is
+    shared between consumers; callers must not mutate it.
+    """
+    ref_pid = (
+        reference_structure.prediction_id
+        if reference_structure is not None else ""
+    )
+    definition_key = json.dumps(definition, sort_keys=True, default=str)
+    key = (structure.prediction_id, ref_pid, definition_key)
+    if cache is not None and key in cache.local_geometry:
+        cache.n_hits += 1
+        return cache.local_geometry[key]
+    if cache is not None:
+        cache.n_misses += 1
+    result = calculate_local_geometry(
+        structure,
+        definition,
+        reference_structure=reference_structure,
+        alignment_atom=alignment_atom,
+    )
+    if cache is not None:
+        cache.local_geometry[key] = result
+    return result
+
+
 def _get_matched_seed_results(
     dataset: Any,
     ref_resolution: Dict[str, Any],
     v3_config: V3Config,
+    figure_cache: Optional[FigureDataCache] = None,
 ) -> Dict[str, List[Any]]:
     """
     Run matched-seed analysis for every target condition vs the reference.
+
+    Results are cached per (reference, condition) so the five figures that
+    consume them (F03, F16, F17, F18, F19) trigger the calculation once.
+    Per-pair RMSDs feed the shared rmsd cache so they are also reused by
+    F02/F15/F20 and the tables.
 
     Returns condition_id -> list of MatchedSeedResult (one per common seed).
     """
@@ -460,11 +726,17 @@ def _get_matched_seed_results(
     if ref_condition is None:
         return matched
 
+    rmsd_cache = figure_cache.rmsd if figure_cache is not None else None
     for condition_id in sorted(dataset.predictions.keys()):
         if condition_id == ref_condition:
             continue
+        cache_key = ("matched_seed", ref_condition, condition_id)
+        if figure_cache is not None and cache_key in figure_cache.matched_seed:
+            figure_cache.n_hits += 1
+            matched[condition_id] = figure_cache.matched_seed[cache_key]
+            continue
         try:
-            matched[condition_id] = analyze_matched_seeds(
+            results = analyze_matched_seeds(
                 dataset,
                 ref_condition,
                 condition_id,
@@ -473,11 +745,16 @@ def _get_matched_seed_results(
                 min_common_atoms=v3_config.structure.min_common_atoms,
                 min_coverage=v3_config.structure.minimum_coverage,
                 min_sequence_identity=v3_config.structure.min_sequence_identity,
+                rmsd_cache=rmsd_cache,
             )
         except Exception as e:
             logger.warning("[V3] Matched-seed analysis failed for %s: %s",
                            condition_id, e)
-            matched[condition_id] = []
+            results = []
+        if figure_cache is not None:
+            figure_cache.n_misses += 1
+            figure_cache.matched_seed[cache_key] = results
+        matched[condition_id] = results
     return matched
 
 
@@ -619,8 +896,15 @@ def _generate_figure_with_data(
     ref_resolution: Dict[str, Any],
     v3_config: V3Config,
     figures_dir: Path,
+    figure_cache: Optional[FigureDataCache] = None,
 ) -> Dict[str, Any]:
-    """Generate a figure with the appropriate data."""
+    """Generate a figure with the appropriate data.
+
+    When ``figure_cache`` is provided, expensive structural calculations
+    (RMSD, displacement, contacts, interfaces, region geometry, matched-seed
+    analysis) are shared across figures instead of recomputed per figure.
+    Results are identical with or without the cache.
+    """
 
     # Build common parameters
     common_params = {
@@ -661,22 +945,16 @@ def _generate_figure_with_data(
                 ref_struct = _get_reference_structure(dataset, seed, sample, ref_condition)
                 if ref_struct is None:
                     continue
-                result = calculate_rmsd(
-                    target_struct,
-                    ref_struct,
-                    alignment_atom=v3_config.structure.alignment_atom,
-                    min_common_atoms=v3_config.structure.min_common_atoms,
-                    min_sequence_identity=v3_config.structure.min_sequence_identity,
-                    min_coverage=v3_config.structure.minimum_coverage,
-                )
-                if result["rmsd"] is not None:
+                rmsd, coverage, _status = _cached_rmsd(
+                    figure_cache, target_struct, ref_struct, v3_config)
+                if rmsd is not None:
                     rmsd_results.append({
                         "condition_a": condition_id,
                         "condition_b": ref_condition,
                         "seed": seed,
                         "sample": sample,
-                        "rmsd": result["rmsd"],
-                        "coverage": result["coverage"],
+                        "rmsd": rmsd,
+                        "coverage": coverage,
                     })
         return generator(rmsd_results=rmsd_results, **common_params)
 
@@ -684,7 +962,8 @@ def _generate_figure_with_data(
     if fig_id == "F03":
         # Matched-seed structural difference (seed-level unit of analysis)
         seed_results = []
-        matched = _get_matched_seed_results(dataset, ref_resolution, v3_config)
+        matched = _get_matched_seed_results(
+            dataset, ref_resolution, v3_config, figure_cache)
         for condition_id in sorted(matched.keys()):
             for msr in matched[condition_id]:
                 if msr.rmsd_mean is None:
@@ -712,11 +991,8 @@ def _generate_figure_with_data(
                 ref_struct = _get_reference_structure(dataset, seed, sample, ref_condition)
                 if ref_struct is None:
                     continue
-                disp = calculate_per_residue_displacement(
-                    ref_struct,
-                    target_struct,
-                    alignment_atom=v3_config.structure.alignment_atom,
-                )
+                disp = _cached_displacement(
+                    figure_cache, ref_struct, target_struct, v3_config)
                 for row in disp["displacements"]:
                     displacement_data.append({
                         "condition_id": condition_id,
@@ -745,11 +1021,8 @@ def _generate_figure_with_data(
                 ref_struct = _get_reference_structure(dataset, seed, sample, ref_condition)
                 if ref_struct is None:
                     continue
-                disp = calculate_per_residue_displacement(
-                    ref_struct,
-                    target_struct,
-                    alignment_atom=v3_config.structure.alignment_atom,
-                )
+                disp = _cached_displacement(
+                    figure_cache, ref_struct, target_struct, v3_config)
                 for row in disp["displacements"]:
                     rows.append({
                         "condition_id": condition_id,
@@ -764,7 +1037,9 @@ def _generate_figure_with_data(
 
     # ------------------------------------------------------------------
     if fig_id == "F06":
-        # Contact map difference (prediction level, matched_sample pairing)
+        # Contact map difference (prediction level, matched_sample pairing).
+        # Uses the full-diff helper so the scalar summary is cached for
+        # F07 and the contact_changes table.
         contact_diff_data = []
         if ref_condition and dataset.predictions:
             for condition_id, seed, sample, target_struct in _iter_predictions(dataset):
@@ -774,11 +1049,8 @@ def _generate_figure_with_data(
                 if ref_struct is None:
                     continue
                 try:
-                    ref_map = calculate_contact_map(
-                        ref_struct, threshold=v3_config.structure.contact_distance)
-                    target_map = calculate_contact_map(
-                        target_struct, threshold=v3_config.structure.contact_distance)
-                    diff = calculate_contact_difference(ref_map, target_map)
+                    diff = _full_contact_diff(
+                        figure_cache, ref_struct, target_struct, v3_config)
                     diff["condition"] = condition_id
                     diff["seed"] = seed
                     diff["sample"] = sample
@@ -806,11 +1078,9 @@ def _generate_figure_with_data(
                         if ref_struct is None:
                             continue
                         try:
-                            ref_map = calculate_contact_map(
-                                ref_struct, threshold=v3_config.structure.contact_distance)
-                            target_map = calculate_contact_map(
-                                target_struct, threshold=v3_config.structure.contact_distance)
-                            diff = calculate_contact_difference(ref_map, target_map)
+                            diff = _cached_contact_diff_summary(
+                                figure_cache, ref_struct, target_struct,
+                                v3_config)
                             diff["condition"] = condition_id
                             seed_diffs.append(diff)
                         except Exception as e:
@@ -842,10 +1112,10 @@ def _generate_figure_with_data(
                 if ref_struct is None:
                     continue
                 try:
-                    ref_ifaces = find_all_interfaces(
-                        ref_struct, threshold=v3_config.structure.contact_distance)
-                    tgt_ifaces = find_all_interfaces(
-                        target_struct, threshold=v3_config.structure.contact_distance)
+                    ref_ifaces = _cached_interfaces(
+                        figure_cache, ref_struct, v3_config)
+                    tgt_ifaces = _cached_interfaces(
+                        figure_cache, target_struct, v3_config)
                     comparison = calculate_interface_comparison(ref_ifaces, tgt_ifaces)
                     for change in comparison["changes"]:
                         interface_data.append({
@@ -876,10 +1146,10 @@ def _generate_figure_with_data(
                 if ref_struct is None:
                     continue
                 try:
-                    ref_ifaces = find_all_interfaces(
-                        ref_struct, threshold=v3_config.structure.contact_distance)
-                    tgt_ifaces = find_all_interfaces(
-                        target_struct, threshold=v3_config.structure.contact_distance)
+                    ref_ifaces = _cached_interfaces(
+                        figure_cache, ref_struct, v3_config)
+                    tgt_ifaces = _cached_interfaces(
+                        figure_cache, target_struct, v3_config)
                     comparison = calculate_interface_comparison(ref_ifaces, tgt_ifaces)
                     for change in comparison["changes"]:
                         if change["change"] == "unchanged":
@@ -927,10 +1197,12 @@ def _generate_figure_with_data(
                     if ref_struct is None:
                         continue
                     try:
-                        target_region = calculate_local_geometry(
-                            target_struct, site, reference_structure=ref_struct)
-                        ref_region = calculate_local_geometry(
-                            ref_struct, site, reference_structure=ref_struct)
+                        target_region = _cached_local_geometry(
+                            figure_cache, target_struct, site, ref_struct,
+                            v3_config.structure.alignment_atom)
+                        ref_region = _cached_local_geometry(
+                            figure_cache, ref_struct, site, ref_struct,
+                            v3_config.structure.alignment_atom)
                         if target_region.status != "valid" or ref_region.status != "valid":
                             continue
                         local_geometry_data.append({
@@ -988,10 +1260,12 @@ def _generate_figure_with_data(
                     if ref_struct is None:
                         continue
                     try:
-                        target_region = calculate_local_geometry(
-                            target_struct, region, reference_structure=ref_struct)
-                        ref_region = calculate_local_geometry(
-                            ref_struct, region, reference_structure=ref_struct)
+                        target_region = _cached_local_geometry(
+                            figure_cache, target_struct, region, ref_struct,
+                            v3_config.structure.alignment_atom)
+                        ref_region = _cached_local_geometry(
+                            figure_cache, ref_struct, region, ref_struct,
+                            v3_config.structure.alignment_atom)
                         if target_region.status != "valid" or ref_region.status != "valid":
                             continue
                         centroid_displacement = None
@@ -1124,21 +1398,11 @@ def _generate_figure_with_data(
                 rmsd = None
                 mean_disp = None
                 if ref_struct is not None:
-                    result = calculate_rmsd(
-                        target_struct,
-                        ref_struct,
-                        alignment_atom=v3_config.structure.alignment_atom,
-                        min_common_atoms=v3_config.structure.min_common_atoms,
-                        min_sequence_identity=v3_config.structure.min_sequence_identity,
-                        min_coverage=v3_config.structure.minimum_coverage,
-                    )
-                    rmsd = result["rmsd"]
+                    rmsd, _coverage, _status = _cached_rmsd(
+                        figure_cache, target_struct, ref_struct, v3_config)
                     if rmsd is not None:
-                        disp = calculate_per_residue_displacement(
-                            ref_struct,
-                            target_struct,
-                            alignment_atom=v3_config.structure.alignment_atom,
-                        )
+                        disp = _cached_displacement(
+                            figure_cache, ref_struct, target_struct, v3_config)
                         if disp["displacements"]:
                             mean_disp = float(np.mean(
                                 [d["displacement"] for d in disp["displacements"]]))
@@ -1177,7 +1441,8 @@ def _generate_figure_with_data(
     if fig_id == "F16":
         # Confidence change vs structural change (seed-level deltas vs reference)
         delta_data = []
-        matched = _get_matched_seed_results(dataset, ref_resolution, v3_config)
+        matched = _get_matched_seed_results(
+            dataset, ref_resolution, v3_config, figure_cache)
         ref_seed_metrics = dataset.seeds.get(ref_condition, {}) if ref_condition else {}
         for condition_id in sorted(matched.keys()):
             for msr in matched[condition_id]:
@@ -1221,7 +1486,8 @@ def _generate_figure_with_data(
     if fig_id == "F17":
         # Seed reproducibility (seed-level unit of analysis)
         seed_repro_data = []
-        matched = _get_matched_seed_results(dataset, ref_resolution, v3_config)
+        matched = _get_matched_seed_results(
+            dataset, ref_resolution, v3_config, figure_cache)
         for condition_id in sorted(matched.keys()):
             msr_list = matched[condition_id]
             if not msr_list:
@@ -1264,7 +1530,8 @@ def _generate_figure_with_data(
     if fig_id == "F18":
         # Effect sizes (seed-level via matched-seed results)
         effect_size_data = []
-        matched = _get_matched_seed_results(dataset, ref_resolution, v3_config)
+        matched = _get_matched_seed_results(
+            dataset, ref_resolution, v3_config, figure_cache)
         for condition_id in sorted(matched.keys()):
             msr_list = matched[condition_id]
             if not msr_list:
@@ -1318,7 +1585,8 @@ def _generate_figure_with_data(
                 "warnings": ["F19 requires experiment metadata with attributes"],
             }
         rmsd_values: Dict[str, List[float]] = {}
-        matched = _get_matched_seed_results(dataset, ref_resolution, v3_config)
+        matched = _get_matched_seed_results(
+            dataset, ref_resolution, v3_config, figure_cache)
         meta_conds = metadata.get("conditions", {})
         for condition_id in sorted(matched.keys()):
             values = []
@@ -1391,21 +1659,11 @@ def _generate_figure_with_data(
                 rmsd = None
                 mean_disp = None
                 if ref_struct is not None:
-                    result = calculate_rmsd(
-                        target_struct,
-                        ref_struct,
-                        alignment_atom=v3_config.structure.alignment_atom,
-                        min_common_atoms=v3_config.structure.min_common_atoms,
-                        min_sequence_identity=v3_config.structure.min_sequence_identity,
-                        min_coverage=v3_config.structure.minimum_coverage,
-                    )
-                    rmsd = result["rmsd"]
+                    rmsd, _coverage, _status = _cached_rmsd(
+                        figure_cache, target_struct, ref_struct, v3_config)
                     if rmsd is not None:
-                        disp = calculate_per_residue_displacement(
-                            ref_struct,
-                            target_struct,
-                            alignment_atom=v3_config.structure.alignment_atom,
-                        )
+                        disp = _cached_displacement(
+                            figure_cache, ref_struct, target_struct, v3_config)
                         if disp["displacements"]:
                             mean_disp = float(np.mean(
                                 [d["displacement"] for d in disp["displacements"]]))
@@ -1450,6 +1708,7 @@ def _generate_v3_tables(
     v3_config: V3Config,
     tables_dir: Path,
     results: Dict[str, Any],
+    figure_cache: Optional[FigureDataCache] = None,
 ) -> None:
     """Generate V3 output tables."""
     ref_condition = ref_resolution.get("reference_condition")
@@ -1489,11 +1748,8 @@ def _generate_v3_tables(
             if ref_struct is None:
                 continue
             try:
-                disp = calculate_per_residue_displacement(
-                    ref_struct,
-                    target_struct,
-                    alignment_atom=v3_config.structure.alignment_atom,
-                )
+                disp = _cached_displacement(
+                    figure_cache, ref_struct, target_struct, v3_config)
             except Exception as e:
                 logger.warning("[V3] Table displacement failed for %s: %s",
                                condition_id, e)
@@ -1527,11 +1783,8 @@ def _generate_v3_tables(
             if ref_struct is None:
                 continue
             try:
-                ref_map = calculate_contact_map(
-                    ref_struct, threshold=v3_config.structure.contact_distance)
-                target_map = calculate_contact_map(
-                    target_struct, threshold=v3_config.structure.contact_distance)
-                diff = calculate_contact_difference(ref_map, target_map)
+                diff = _cached_contact_diff_summary(
+                    figure_cache, ref_struct, target_struct, v3_config)
             except Exception as e:
                 logger.warning("[V3] Table contact diff failed for %s: %s",
                                condition_id, e)
@@ -1565,10 +1818,10 @@ def _generate_v3_tables(
             if ref_struct is None:
                 continue
             try:
-                ref_ifaces = find_all_interfaces(
-                    ref_struct, threshold=v3_config.structure.contact_distance)
-                tgt_ifaces = find_all_interfaces(
-                    target_struct, threshold=v3_config.structure.contact_distance)
+                ref_ifaces = _cached_interfaces(
+                    figure_cache, ref_struct, v3_config)
+                tgt_ifaces = _cached_interfaces(
+                    figure_cache, target_struct, v3_config)
                 comparison = calculate_interface_comparison(ref_ifaces, tgt_ifaces)
             except Exception as e:
                 logger.warning("[V3] Table interface diff failed for %s: %s",
@@ -1636,21 +1889,11 @@ def _generate_v3_tables(
             rmsd = None
             mean_disp = None
             if ref_struct is not None:
-                result = calculate_rmsd(
-                    target_struct,
-                    ref_struct,
-                    alignment_atom=v3_config.structure.alignment_atom,
-                    min_common_atoms=v3_config.structure.min_common_atoms,
-                    min_sequence_identity=v3_config.structure.min_sequence_identity,
-                    min_coverage=v3_config.structure.minimum_coverage,
-                )
-                rmsd = result["rmsd"]
+                rmsd, _coverage, _status = _cached_rmsd(
+                    figure_cache, target_struct, ref_struct, v3_config)
                 if rmsd is not None:
-                    disp = calculate_per_residue_displacement(
-                        ref_struct,
-                        target_struct,
-                        alignment_atom=v3_config.structure.alignment_atom,
-                    )
+                    disp = _cached_displacement(
+                        figure_cache, ref_struct, target_struct, v3_config)
                     if disp["displacements"]:
                         mean_disp = float(np.mean(
                             [d["displacement"] for d in disp["displacements"]]))
@@ -1738,6 +1981,7 @@ def _write_v3_manifest(
         "warnings": results.get("warnings", []),
         "errors": results.get("errors", []),
         "skipped": results.get("skipped", []),
+        "figure_cache": results.get("figure_cache", {}),
     }
 
     for fig_id, fig_result in results.get("figures", {}).items():
