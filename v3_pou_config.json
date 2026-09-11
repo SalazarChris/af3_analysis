@@ -1,0 +1,45 @@
+{
+  "reference": {
+    "condition": "cond_001"
+  },
+  "structure": {
+    "alignment_atom": "CA",
+    "contact_distance": 8.0,
+    "minimum_coverage": 0.80
+  },
+  "clustering": {
+    "method": "hierarchical",
+    "linkage": "average",
+    "distance_metric": "rmsd_ca"
+  },
+  "sites": [
+    {
+      "label": "T101_site",
+      "chain": "A",
+      "residue": 101,
+      "radius": 8.0
+    },
+    {
+      "label": "S102_site",
+      "chain": "A",
+      "residue": 102,
+      "radius": 8.0
+    }
+  ],
+  "regions": [
+    {
+      "label": "POU_Specific",
+      "chain": "A",
+      "start": 1,
+      "end": 65
+    },
+    {
+      "label": "POU_Homeodomain",
+      "chain": "A",
+      "start": 85,
+      "end": 152
+    }
+  ],
+  "output_dpi": 300,
+  "output_format": "png"
+}

@@ -25,3 +25,17 @@ build/
 # Demoted nested git repositories (kept on disk for reversibility, not tracked)
 .git.nested-backup/
 
+# Generated analysis/visualization outputs (reproducible from source; do not track)
+af3_analysis_output*/
+debug_struct_test/
+run_*/
+
+# Raw thesis data (large; not tracked in plain git)
+testdata/
+
+# Tool/workspace metadata
+.freebuff/
+
+# Temporary files
+tmp*.cif
+

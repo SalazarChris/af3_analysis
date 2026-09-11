@@ -370,23 +370,7 @@ def run_v3_pipeline(
         logger.error("[V3] Table generation failed: %s", e)
         results["errors"].append(f"Table generation failed: {e}")
 
-    # Phase 7: Write manifest
-    logger.info("[V3] Phase 7: Writing manifest")
-    try:
-        _write_v3_manifest(v3_metadata_dir, results)
-    except Exception as e:
-        logger.error("[V3] Manifest writing failed: %s", e)
-        results["errors"].append(f"Manifest writing failed: {e}")
-
-    # Phase 8: Generate report
-    logger.info("[V3] Phase 8: Generating report")
-    try:
-        _generate_v3_report(v3_report_dir, results)
-    except Exception as e:
-        logger.error("[V3] Report generation failed: %s", e)
-        results["errors"].append(f"Report generation failed: {e}")
-
-    # Finalize
+    # Finalize results summary and status
     elapsed = time.time() - results["start_time"]
     results["elapsed_s"] = elapsed
 
@@ -406,6 +390,22 @@ def run_v3_pipeline(
         results["status"] = "complete"
     else:
         results["status"] = "completed_with_errors"
+
+    # Phase 7: Write manifest
+    logger.info("[V3] Phase 7: Writing manifest")
+    try:
+        _write_v3_manifest(v3_metadata_dir, results)
+    except Exception as e:
+        logger.error("[V3] Manifest writing failed: %s", e)
+        results["errors"].append(f"Manifest writing failed: {e}")
+
+    # Phase 8: Generate report
+    logger.info("[V3] Phase 8: Generating report")
+    try:
+        _generate_v3_report(v3_report_dir, results)
+    except Exception as e:
+        logger.error("[V3] Report generation failed: %s", e)
+        results["errors"].append(f"Report generation failed: {e}")
 
     logger.info("[V3] Pipeline complete: %d success, %d skipped, %d failed (%.1fs)",
                 n_success, n_skipped, n_failed, elapsed)
@@ -788,9 +788,9 @@ def _generate_figure_with_data(
                         continue
                     try:
                         target_region = calculate_local_geometry(
-                            target_struct, site)
+                            target_struct, site, reference_structure=ref_struct)
                         ref_region = calculate_local_geometry(
-                            ref_struct, site)
+                            ref_struct, site, reference_structure=ref_struct)
                         if target_region.status != "valid" or ref_region.status != "valid":
                             continue
                         local_geometry_data.append({
@@ -835,9 +835,9 @@ def _generate_figure_with_data(
                         continue
                     try:
                         target_region = calculate_local_geometry(
-                            target_struct, region)
+                            target_struct, region, reference_structure=ref_struct)
                         ref_region = calculate_local_geometry(
-                            ref_struct, region)
+                            ref_struct, region, reference_structure=ref_struct)
                         if target_region.status != "valid" or ref_region.status != "valid":
                             continue
                         centroid_displacement = None
@@ -1157,6 +1157,7 @@ def _generate_figure_with_data(
             }
         rmsd_values: Dict[str, List[float]] = {}
         matched = _get_matched_seed_results(dataset, ref_resolution, v3_config)
+        meta_conds = metadata.get("conditions", {})
         for condition_id in sorted(matched.keys()):
             values = []
             for msr in matched[condition_id]:
@@ -1165,7 +1166,22 @@ def _generate_figure_with_data(
                     if v is not None and np.isfinite(v)
                 )
             if values:
-                rmsd_values[condition_id] = values
+                cond_obj = dataset.conditions.get(condition_id)
+                cond_name = cond_obj.condition_name if cond_obj else condition_id
+                key = condition_id
+                if condition_id not in meta_conds and cond_name in meta_conds:
+                    key = cond_name
+                rmsd_values[key] = values
+
+        if ref_condition:
+            ref_obj = dataset.conditions.get(ref_condition)
+            ref_name = ref_obj.condition_name if ref_obj else ref_condition
+            ref_key = ref_condition
+            if ref_condition not in meta_conds and ref_name in meta_conds:
+                ref_key = ref_name
+            if ref_key not in rmsd_values and ref_key in meta_conds:
+                n_ref_seeds = len(dataset.seeds.get(ref_condition, {})) or 1
+                rmsd_values[ref_key] = [0.0] * n_ref_seeds
         if not rmsd_values:
             return {
                 "status": "skip",

@@ -88,6 +88,16 @@ def calculate_local_geometry(
     radius = region_definition.get("radius")
     center_residue = region_definition.get("center_residue")  # (chain_id, auth_seq_id)
 
+    # Normalize aliases from JSON configuration
+    if center_residue is None and "residue" in region_definition:
+        center_residue = (region_definition.get("chain", "A"), region_definition["residue"])
+    if seq_range is None and "start" in region_definition and "end" in region_definition:
+        seq_range = (region_definition["start"], region_definition["end"])
+    if chain_ids is None and "chain" in region_definition:
+        chain_ids = [region_definition["chain"]]
+    elif chain_ids is None and "chains" in region_definition:
+        chain_ids = list(region_definition["chains"])
+
     # Collect atoms in region
     region_atoms = []
 
@@ -180,7 +190,7 @@ def calculate_local_geometry(
                     "auth_seq_id": residue.auth_seq_id,
                     "residue_name": residue.residue_name,
                     "coords": np.array(coords),
-                    "plddt": None,  # Would come from AF3 data
+                    "plddt": residue.plddt_mean,
                 })
 
     # Calculate region properties
@@ -233,10 +243,13 @@ def calculate_local_geometry(
                 diff = coords_arr - np.array(ref_atoms)
                 local_rmsd = float(np.sqrt(np.mean(np.sum(diff ** 2, axis=1))))
 
-    # Local pLDDT (would come from AF3 data)
+    # Local pLDDT
     local_plddt_mean = None
-    # if structure.plddt_per_residue is available:
-    #     ...
+    local_plddts = [a["plddt"] for a in region_atoms if a.get("plddt") is not None]
+    if local_plddts:
+        local_plddt_mean = float(np.mean(local_plddts))
+    elif structure.plddt_mean is not None:
+        local_plddt_mean = structure.plddt_mean
 
     # Interface proximity
     interface_distance_min = None
