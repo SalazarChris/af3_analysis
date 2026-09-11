@@ -124,6 +124,11 @@ class V3Config:
     regions: List[Dict[str, Any]] = field(default_factory=list)
     # Example: [{"label": "domain1", "chain": "A", "start": 1, "end": 50}]
 
+    # Data-driven detection of sites/regions when no manual definitions
+    # are supplied. Manual definitions always take priority.
+    auto_sites: bool = False
+    auto_regions: bool = False
+
     # Output settings
     output_dpi: int = 300
     output_format: str = "png"

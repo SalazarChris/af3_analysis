@@ -51,6 +51,10 @@ from .analysis.matched_seed import (
 )
 from .structural.rmsd import calculate_rmsd
 from .structural.displacement import calculate_per_residue_displacement
+from .structural.detection import (
+    detect_displacement_sites,
+    detect_contact_regions,
+)
 from .structural.contacts import calculate_contact_map, calculate_contact_difference
 from .structural.interfaces import find_all_interfaces, calculate_interface_comparison
 from .structural.pairwise import (
@@ -476,6 +480,135 @@ def _get_matched_seed_results(
     return matched
 
 
+def effective_sites(
+    dataset: Any,
+    ref_resolution: Dict[str, Any],
+    v3_config: V3Config,
+) -> List[Dict[str, Any]]:
+    """Resolve site definitions for F10.
+
+    Manually configured sites take priority. Otherwise, when automatic
+    detection is enabled, sites are detected as concentrations of
+    between-condition displacement (predicted structural sites; never
+    functional annotations). Returns empty when nothing is available so
+    F10 skips instead of inventing definitions.
+    """
+    if v3_config.sites:
+        return list(v3_config.sites)
+    if not v3_config.auto_sites:
+        return []
+    ref_condition = ref_resolution.get("reference_condition")
+    try:
+        sites = detect_displacement_sites(
+            dataset,
+            ref_condition,
+            radius=v3_config.structure.contact_distance,
+            alignment_atom=v3_config.structure.alignment_atom,
+        )
+    except Exception as e:
+        logger.warning("[V3] Automatic site detection failed: %s", e)
+        return []
+    if sites:
+        logger.info(
+            "[V3] Detected %d candidate site(s) from displacement "
+            "concentration (predicted structural sites, not functional "
+            "annotations)", len(sites))
+    return sites
+
+
+def effective_regions(
+    dataset: Any,
+    all_structures: List[Any],
+    ref_resolution: Dict[str, Any],
+    v3_config: V3Config,
+) -> List[Dict[str, Any]]:
+    """Resolve region definitions for F11.
+
+    Manually configured regions take priority. Otherwise, when automatic
+    detection is enabled, regions are detected as connected components of
+    the reference structure's contact graph (predicted structural regions;
+    never functional annotations). Returns empty when nothing is available
+    so F11 skips instead of inventing definitions.
+    """
+    if v3_config.regions:
+        return list(v3_config.regions)
+    if not v3_config.auto_regions:
+        return []
+    ref_condition = ref_resolution.get("reference_condition")
+    reference_structure = None
+    if ref_condition:
+        ref_seeds = dataset.predictions.get(ref_condition, {})
+        for seed in sorted(ref_seeds.keys()):
+            for sample in sorted(ref_seeds[seed].keys()):
+                structure = ref_seeds[seed][sample]
+                if structure is not None and structure.parse_status == "success":
+                    reference_structure = structure
+                    break
+            if reference_structure is not None:
+                break
+    if reference_structure is None:
+        return []
+    try:
+        regions = detect_contact_regions(
+            reference_structure,
+            contact_threshold=v3_config.structure.contact_distance,
+        )
+    except Exception as e:
+        logger.warning("[V3] Automatic region detection failed: %s", e)
+        return []
+    if regions:
+        logger.info(
+            "[V3] Detected %d candidate region(s) from reference contact "
+            "graph (predicted structural regions, not functional "
+            "annotations)", len(regions))
+    return regions
+
+
+def _annotate_detection_provenance(
+    fig_result: Dict[str, Any],
+    definitions: List[Dict[str, Any]],
+    kind_plural: str,
+) -> None:
+    """Attach detection provenance to a figure result (warnings) when any
+    definition was data-detected (manual definitions carry no detection
+    metadata keys)."""
+    for d in definitions:
+        if (
+            "mean_displacement" in d
+            or "z" in d
+            or "seq_list" in d
+            or "n_residues" in d
+        ):
+            warnings = fig_result.setdefault("warnings", [])
+            warnings.append(
+                f"{kind_plural} were detected from the data as predicted "
+                "structural " + kind_plural + "; they are not functional "
+                "annotations"
+            )
+            return
+
+
+def _detection_title_suffix(
+    definitions: List[Dict[str, Any]],
+    kind_plural: str,
+    method_desc: str,
+) -> Optional[str]:
+    """Title annotation making the provenance of detected definitions
+    explicit (manual definitions carry no detection metadata keys)."""
+    for d in definitions:
+        if (
+            "mean_displacement" in d
+            or "z" in d
+            or "seq_list" in d
+            or "n_residues" in d
+        ):
+            return (
+                f"{kind_plural}: predicted structural {kind_plural} "
+                f"({method_desc}); not functional annotations"
+            )
+    return None
+
+
 def _generate_figure_with_data(
     generator: Any,
     fig_id: str,
@@ -766,18 +899,24 @@ def _generate_figure_with_data(
 
     # ------------------------------------------------------------------
     if fig_id == "F10":
-        # Local geometry: config-driven regions/sites only (never invented)
-        if not v3_config.sites:
+        # Local geometry: manually configured sites, or data-driven
+        # detection when enabled. Manual definitions always take priority.
+        sites = effective_sites(dataset, ref_resolution, v3_config)
+        if not sites:
             return {
                 "status": "skip",
-                "reason": "No sites configured (sites are config-driven)",
+                "reason": "No sites available (none configured and "
+                          "automatic detection disabled or empty)",
                 "output_path": None,
                 "n_observations": 0,
-                "warnings": ["F10 requires v3_config.sites definitions"],
+                "warnings": [
+                    "F10 requires site definitions; none were configured "
+                    "or detected"
+                ],
             }
         local_geometry_data = []
         if ref_condition and dataset.predictions:
-            for site in v3_config.sites:
+            for site in sites:
                 site_label = site.get("label", "unnamed")
                 for condition_id, seed, sample, target_struct in _iter_predictions(dataset):
                     if condition_id == ref_condition:
@@ -809,22 +948,36 @@ def _generate_figure_with_data(
                     except Exception as e:
                         logger.warning("[V3] F10 local geometry failed (%s/%s): %s",
                                        site_label, condition_id, e)
-        return generator(local_geometry_data=local_geometry_data, **common_params)
+        f10_result = generator(
+            local_geometry_data=local_geometry_data,
+            title=_detection_title_suffix(
+                sites, "sites", "concentrated between-condition displacement"
+            ),
+            **common_params,
+        )
+        _annotate_detection_provenance(f10_result, sites, "sites")
+        return f10_result
 
     # ------------------------------------------------------------------
     if fig_id == "F11":
-        # Domain motion: config-driven regions only (never invented)
-        if not v3_config.regions:
+        # Domain motion: manually configured regions, or data-driven
+        # detection when enabled. Manual definitions always take priority.
+        regions = effective_regions(dataset, all_structures, ref_resolution, v3_config)
+        if not regions:
             return {
                 "status": "skip",
-                "reason": "No regions configured (regions are config-driven)",
+                "reason": "No regions available (none configured and "
+                          "automatic detection disabled or empty)",
                 "output_path": None,
                 "n_observations": 0,
-                "warnings": ["F11 requires v3_config.regions definitions"],
+                "warnings": [
+                    "F11 requires region definitions; none were configured "
+                    "or detected"
+                ],
             }
         domain_motion_data = []
         if ref_condition and dataset.predictions:
-            for region in v3_config.regions:
+            for region in regions:
                 region_label = region.get("label", "unnamed")
                 for condition_id, seed, sample, target_struct in _iter_predictions(dataset):
                     if condition_id == ref_condition:
@@ -867,7 +1020,15 @@ def _generate_figure_with_data(
                     except Exception as e:
                         logger.warning("[V3] F11 domain motion failed (%s/%s): %s",
                                        region_label, condition_id, e)
-        return generator(domain_motion_data=domain_motion_data, **common_params)
+        f11_result = generator(
+            domain_motion_data=domain_motion_data,
+            title=_detection_title_suffix(
+                regions, "regions", "reference contact-graph components"
+            ),
+            **common_params,
+        )
+        _annotate_detection_provenance(f11_result, regions, "regions")
+        return f11_result
 
     # ------------------------------------------------------------------
     if fig_id in ("F12", "F13", "F14"):

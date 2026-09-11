@@ -36,6 +36,10 @@ from .regions import (
     calculate_local_geometry,
     RegionResult,
 )
+from .detection import (
+    detect_displacement_sites,
+    detect_contact_regions,
+)
 
 __all__ = [
     "find_common_structural_space",
@@ -58,4 +62,6 @@ __all__ = [
     "mds_embedding",
     "calculate_local_geometry",
     "RegionResult",
+    "detect_displacement_sites",
+    "detect_contact_regions",
 ]

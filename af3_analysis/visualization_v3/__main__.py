@@ -90,6 +90,24 @@ def create_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
+        "--auto-sites",
+        action="store_true",
+        help="Detect F10 sites automatically as concentrations of "
+             "between-condition displacement (used only when --site is "
+             "not given; output is labeled as predicted structural "
+             "sites)",
+    )
+
+    parser.add_argument(
+        "--auto-regions",
+        action="store_true",
+        help="Detect F11 regions automatically as connected components "
+             "of the reference contact graph (used only when --region is "
+             "not given; output is labeled as predicted structural "
+             "regions)",
+    )
+
+    parser.add_argument(
         "--contact-distance",
         type=float,
         default=None,
@@ -165,6 +183,13 @@ def main(args: list = None) -> int:
         if parsed.min_coverage is not None:
             structure = replace(structure, minimum_coverage=parsed.min_coverage)
         v3_config = replace(v3_config, structure=structure)
+
+    if parsed.auto_sites or parsed.auto_regions:
+        v3_config = replace(
+            v3_config,
+            auto_sites=parsed.auto_sites,
+            auto_regions=parsed.auto_regions,
+        )
 
     # Overwrite protection
     v3_dir = run_dir / "v3"
