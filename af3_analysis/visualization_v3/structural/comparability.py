@@ -207,8 +207,9 @@ def find_common_structural_space(
             continue
 
         for auth_seq_id in common_residues.get(chain_id, []):
-            res_a = chain_a.get_residue(auth_seq_id) if hasattr(chain_a, 'get_residue') else None
-            res_b = chain_b.get_residue(auth_seq_id) if hasattr(chain_b, 'get_residue') else None
+            # O(1) lookup via the chain's prebuilt residue index.
+            res_a = chain_a.get_residue(auth_seq_id)
+            res_b = chain_b.get_residue(auth_seq_id)
 
             if res_a and res_b:
                 # CA atoms
@@ -266,6 +267,158 @@ def has_sufficient_coverage(
     return space.coverage >= threshold and space.status == "comparable"
 
 
+# ---------------------------------------------------------------------------
+# Prepared-structure fast path
+#
+# One-vs-many comparisons (the pairwise matrix, reference displacements)
+# repeat the same chain/residue bookkeeping for every pair. The helpers
+# below precompute each structure's chain selections and per-chain residue
+# index once so the per-pair work is set intersection only. Results are
+# identical to the non-prepared path (validated by tests).
+# ---------------------------------------------------------------------------
+
+@dataclass
+class PreparedStructure:
+    """Precomputed per-chain residue/CA inventories for repeated comparisons."""
+
+    structure: StructureData
+    # chain_id -> {auth_seq_id: ca coords or None}; protein chains only
+    # (empty when the structure has no protein chains)
+    protein_ca_by_res: Dict[str, Dict[int, Optional[Tuple[float, float, float]]]]
+    # chain_id -> {auth_seq_id: ca coords or None}; all chains
+    all_ca_by_res: Dict[str, Dict[int, Optional[Tuple[float, float, float]]]]
+
+
+def prepare_structure(
+    structure: StructureData,
+) -> PreparedStructure:
+    """Precompute residue inventories for a structure.
+
+    Both protein-only and all-chain inventories are kept so the pair-time
+    chain selection can replicate ``find_common_structural_space`` exactly:
+    protein chains of both structures when both have them, otherwise all
+    chains of both.
+    """
+    all_ca_by_res: Dict[str, Dict[int, Optional[Tuple[float, float, float]]]] = {}
+    for chain_id in structure.chain_ids:
+        chain = structure.get_chain(chain_id)
+        if chain is None:
+            continue
+        all_ca_by_res[chain_id] = {
+            r.auth_seq_id: r.ca_coords
+            for r in chain.residues
+            if r.auth_seq_id is not None
+        }
+
+    protein_ids = set(structure.get_protein_chains())
+    protein_ca_by_res = {
+        cid: m for cid, m in all_ca_by_res.items() if cid in protein_ids
+    }
+    return PreparedStructure(
+        structure=structure,
+        protein_ca_by_res=protein_ca_by_res,
+        all_ca_by_res=all_ca_by_res,
+    )
+
+
+def _pair_ca_maps(
+    prepared_a: PreparedStructure,
+    prepared_b: PreparedStructure,
+) -> Tuple[
+    Dict[str, Dict[int, Optional[Tuple[float, float, float]]]],
+    Dict[str, Dict[int, Optional[Tuple[float, float, float]]]],
+]:
+    """Chain selection mirroring find_common_structural_space."""
+    if prepared_a.protein_ca_by_res and prepared_b.protein_ca_by_res:
+        return prepared_a.protein_ca_by_res, prepared_b.protein_ca_by_res
+    return prepared_a.all_ca_by_res, prepared_b.all_ca_by_res
+
+
+def find_common_space_prepared(
+    prepared_a: PreparedStructure,
+    prepared_b: PreparedStructure,
+    *,
+    min_sequence_identity: float = 0.5,
+) -> Tuple[str, float, Dict[str, List[int]], int]:
+    """Common-space determination between two prepared structures.
+
+    Returns ``(status, coverage, common_residues_by_chain, n_common_residues)``
+    where status is ``comparable`` / ``partially_comparable`` /
+    ``not_comparable`` using the same thresholds and reasons as
+    ``find_common_structural_space`` (sequence identity gate, then the 0.80
+    coverage boundary and the >=3 atom minimum).
+    """
+    ca_a_all, ca_b_all = _pair_ca_maps(prepared_a, prepared_b)
+    common_chains = sorted(set(ca_a_all) & set(ca_b_all))
+    if not common_chains:
+        return "not_comparable", 0.0, {}, 0
+
+    common_residues: Dict[str, List[int]] = {}
+    total_common = 0
+    total_ref = 0
+    n_ca_pairs = 0
+    for chain_id in common_chains:
+        ca_a = ca_a_all[chain_id]
+        ca_b = ca_b_all[chain_id]
+        common_ids = sorted(set(ca_a) & set(ca_b))
+        common_residues[chain_id] = common_ids
+        total_common += len(common_ids)
+        total_ref += len(ca_a)
+        n_ca_pairs += sum(
+            1 for rid in common_ids
+            if ca_a[rid] is not None and ca_b[rid] is not None
+        )
+
+    if total_ref == 0:
+        return "not_comparable", 0.0, common_residues, 0
+
+    sequence_identity = total_common / total_ref
+    coverage = sequence_identity
+
+    if sequence_identity < min_sequence_identity:
+        return "not_comparable", coverage, common_residues, n_ca_pairs
+    if n_ca_pairs < 3:
+        return "not_comparable", coverage, common_residues, n_ca_pairs
+    if coverage < 0.80:
+        return "partially_comparable", coverage, common_residues, n_ca_pairs
+    return "comparable", coverage, common_residues, n_ca_pairs
+
+
+def kabsch_rmsd_prepared(
+    prepared_a: PreparedStructure,
+    prepared_b: PreparedStructure,
+    common_residues: Dict[str, List[int]],
+) -> Optional[float]:
+    """CA Kabsch RMSD over the given common residues, or None if too few.
+
+    Coordinates are gathered with O(1) dict lookups from the prepared
+    inventories; alignment uses the same ``_kabsch_rmsd`` implementation as
+    the standard path.
+    """
+    coords_a: List[Tuple[float, float, float]] = []
+    coords_b: List[Tuple[float, float, float]] = []
+    ca_a_all, ca_b_all = _pair_ca_maps(prepared_a, prepared_b)
+    for chain_id, ids in common_residues.items():
+        ca_a = ca_a_all[chain_id]
+        ca_b = ca_b_all[chain_id]
+        for rid in ids:
+            ca = ca_a[rid]
+            cb = ca_b[rid]
+            if ca is not None and cb is not None:
+                coords_a.append(ca)
+                coords_b.append(cb)
+
+    if len(coords_a) < 3:
+        return None
+
+    from .rmsd import _kabsch_rmsd
+
+    return _kabsch_rmsd(
+        np.array(coords_a, dtype=np.float64),
+        np.array(coords_b, dtype=np.float64),
+    )
+
+
 def get_common_ca_coords(
     space: CommonStructuralSpace,
     structure_a: StructureData,
@@ -286,22 +439,14 @@ def get_common_ca_coords(
         if chain_a is None or chain_b is None:
             continue
 
-        # Find CA atoms in each structure
-        # This is a simplified lookup - in practice you'd use the residue index
-        res_a = None
-        res_b = None
-        for r in chain_a.residues:
-            if r.auth_seq_id == auth_seq_a and r.ca_coords is not None:
-                res_a = r
-                break
-        for r in chain_b.residues:
-            if r.auth_seq_id == auth_seq_b and r.ca_coords is not None:
-                res_b = r
-                break
+        # O(1) lookup via the chain's prebuilt residue index.
+        res_a = chain_a.get_residue(auth_seq_a)
+        res_b = chain_b.get_residue(auth_seq_b)
 
         if res_a and res_b:
-            coords_a.append(res_a.ca_coords)
-            coords_b.append(res_b.ca_coords)
+            if res_a.ca_coords is not None and res_b.ca_coords is not None:
+                coords_a.append(res_a.ca_coords)
+                coords_b.append(res_b.ca_coords)
 
     if not coords_a:
         return np.array([]).reshape(0, 3), np.array([]).reshape(0, 3)
@@ -332,16 +477,9 @@ def get_common_backbone_coords(
         if chain_a is None or chain_b is None:
             continue
 
-        res_a = None
-        res_b = None
-        for r in chain_a.residues:
-            if r.auth_seq_id == auth_seq_a:
-                res_a = r
-                break
-        for r in chain_b.residues:
-            if r.auth_seq_id == auth_seq_b:
-                res_b = r
-                break
+        # O(1) lookup via the chain's prebuilt residue index.
+        res_a = chain_a.get_residue(auth_seq_a)
+        res_b = chain_b.get_residue(auth_seq_b)
 
         if res_a and res_b:
             # Order: N, CA, C, O

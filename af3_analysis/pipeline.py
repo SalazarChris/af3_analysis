@@ -327,8 +327,20 @@ def _stage_v3_visualization(
     """
     t0 = time.time()
     try:
+        import logging
+
         from af3_analysis.visualization_v3.runner import run_v3_pipeline
         from af3_analysis.visualization_v3.config import V3Config
+
+        # Surface [V3] progress on the console. The menu entry point does not
+        # configure logging, so without this every V3 INFO message (including
+        # pairwise-calculation progress) would be silently dropped.
+        v3_pkg_logger = logging.getLogger("af3_analysis.visualization_v3")
+        if not v3_pkg_logger.handlers:
+            _v3_handler = logging.StreamHandler()
+            _v3_handler.setFormatter(logging.Formatter("%(message)s"))
+            v3_pkg_logger.addHandler(_v3_handler)
+            v3_pkg_logger.setLevel(logging.INFO)
 
         v3_config = V3Config()
         if reference_condition:

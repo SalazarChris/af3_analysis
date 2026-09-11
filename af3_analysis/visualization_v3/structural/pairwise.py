@@ -14,6 +14,8 @@ Caches this calculation because it can be expensive.
 
 from __future__ import annotations
 
+import logging
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -22,6 +24,23 @@ import numpy as np
 import pandas as pd
 
 from ..model import StructureData
+from .comparability import (
+    find_common_space_prepared,
+    kabsch_rmsd_prepared,
+    prepare_structure,
+    PreparedStructure,
+)
+from .rmsd import calculate_rmsd
+
+logger = logging.getLogger(__name__)
+
+# Progress log interval (pairs). Keeps long O(N^2) runs visibly alive
+# without flooding logs for small datasets.
+PROGRESS_LOG_EVERY = 500
+
+# Minimum pair count before progress messages are raised to WARNING so they
+# remain visible even if only warnings are being shown (e.g. quiet console).
+PROGRESS_LOG_HEAVY_RUN_MIN_PAIRS = 20_000
 
 
 @dataclass
@@ -108,31 +127,78 @@ def calculate_pairwise_rmsd_matrix(
     matrix = np.full((n, n), np.nan)
     valid = np.zeros((n, n), dtype=bool)
 
+    # Prepare per-structure inventories once (O(N) setup) so each of the
+    # N*(N-1)/2 comparisons resolves the common space with set operations
+    # instead of rebuilding residue dictionaries per pair. The prepared path
+    # is only used for CA alignment; other alignment atoms fall back to the
+    # general per-pair implementation (same results, validated by tests).
+    prepared: List[PreparedStructure] = [
+        prepare_structure(s) for s in structures
+    ]
+    use_fast_path = alignment_atom == "CA"
+
+    n_pairs = n * (n - 1) // 2
+    t_start = time.perf_counter()
+    logger.info(
+        "[V3 Pairwise] Computing %d pairwise RMSD values for %d structures",
+        n_pairs, n,
+    )
+
     # Calculate pairwise RMSD
     # Only calculate upper triangle, mirror to lower
+    n_done = 0
+    progress_level = (
+        logging.WARNING if n_pairs >= PROGRESS_LOG_HEAVY_RUN_MIN_PAIRS else logging.INFO
+    )
     for i in range(n):
         for j in range(i + 1, n):
-            # Check if same condition/seed (can skip if desired)
-            # For now, calculate all pairwise
+            if use_fast_path:
+                status, _coverage, common_residues, n_ca_pairs = (
+                    find_common_space_prepared(
+                        prepared[i],
+                        prepared[j],
+                        min_sequence_identity=min_sequence_identity,
+                    )
+                )
+                if (
+                    status != "not_comparable"
+                    and n_ca_pairs >= min_common_atoms
+                ):
+                    rmsd_value = kabsch_rmsd_prepared(
+                        prepared[i], prepared[j], common_residues
+                    )
+                else:
+                    rmsd_value = None
+            else:
+                result = calculate_rmsd(
+                    structures[i],
+                    structures[j],
+                    alignment_atom=alignment_atom,
+                    min_common_atoms=min_common_atoms,
+                    min_sequence_identity=min_sequence_identity,
+                    min_coverage=min_coverage,
+                )
+                rmsd_value = result["rmsd"]
 
-            # Get RMSD
-            # Import here to avoid circular imports
-            from .rmsd import calculate_rmsd
-
-            result = calculate_rmsd(
-                structures[i],
-                structures[j],
-                alignment_atom=alignment_atom,
-                min_common_atoms=min_common_atoms,
-                min_sequence_identity=min_sequence_identity,
-                min_coverage=min_coverage,
-            )
-
-            if result["rmsd"] is not None:
-                matrix[i, j] = result["rmsd"]
-                matrix[j, i] = result["rmsd"]
+            if rmsd_value is not None:
+                matrix[i, j] = rmsd_value
+                matrix[j, i] = rmsd_value
                 valid[i, j] = True
                 valid[j, i] = True
+
+            n_done += 1
+            if n_done % PROGRESS_LOG_EVERY == 0:
+                elapsed = time.perf_counter() - t_start
+                rate = n_done / elapsed if elapsed > 0 else 0.0
+                eta_s = (n_pairs - n_done) / rate if rate > 0 else float("nan")
+                logger.log(
+                    progress_level,
+                    "[V3 Pairwise] %d/%d pairs (%.0f%%), %.1f pairs/s, ETA %.0f s",
+                    n_done, n_pairs, 100.0 * n_done / n_pairs, rate, eta_s,
+                )
+
+    elapsed = time.perf_counter() - t_start
+    logger.info("[V3 Pairwise] Done: %d pairs in %.1f s", n_pairs, elapsed)
 
     # Set diagonal to 0 (self-comparison)
     np.fill_diagonal(matrix, 0.0)
@@ -189,10 +255,13 @@ def save_pairwise_matrix(
     # Save matrix
     df.to_csv(output_dir / filename)
 
-    # Save metadata
-    metadata.to_csv(output_dir / "pairwise_metadata.csv")
+    # Save metadata next to the matrix (name derived from the matrix
+    # filename so loader/save stay in sync when a cache key is used).
+    matrix_path = output_dir / filename
+    metadata_path = matrix_path.with_name(matrix_path.stem + "_metadata.csv")
+    metadata.to_csv(metadata_path)
 
-    return output_dir / filename
+    return matrix_path
 
 
 def load_pairwise_matrix(
@@ -215,11 +284,18 @@ def load_pairwise_matrix(
         seeds = [0] * len(predictions)
         samples = [0] * len(predictions)
 
-    # Create validity mask (non-NaN and non-self)
-    valid_array = ~np.isnan(matrix_array) & (matrix_array > 0)
+    # Reconstruct validity mask: NaN cells were never computable; the
+    # diagonal (self-comparison) is always valid. A zero RMSD between two
+    # distinct structures is a legitimate measurement and must stay valid.
+    valid_array = ~np.isnan(matrix_array)
+    np.fill_diagonal(valid_array, True)
 
-    # Calculate statistics
-    distances = matrix_array[valid_array]
+    # Statistics follow the compute-side convention: exclude self-comparisons
+    # and zero/negative values.
+    n_pred = len(predictions)
+    off_diagonal = ~np.eye(n_pred, dtype=bool)
+    distances = matrix_array[valid_array & off_diagonal]
+    distances = distances[distances > 0]
     if len(distances) > 0:
         mean_dist = float(np.mean(distances))
         median_dist = float(np.median(distances))
