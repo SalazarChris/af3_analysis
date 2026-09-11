@@ -388,6 +388,14 @@ class Dataset:
     # Reference resolution
     reference_condition: Optional[str] = None
 
+    # Mapping from raw CIF condition stems (e.g. AF3 output folder names)
+    # to canonical condition ids. Used to resolve human-supplied reference
+    # names to dataset condition ids.
+    condition_stem_map: Dict[str, str] = field(default_factory=dict)
+    # stem -> all condition ids sharing that stem (ambiguity is possible
+    # when legacy and full runs coexist in one registry).
+    condition_stem_candidates: Dict[str, List[str]] = field(default_factory=dict)
+
     # Metadata
     experiment_metadata: Optional[Dict[str, Any]] = None
 

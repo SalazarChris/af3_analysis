@@ -223,6 +223,7 @@ def run_v3_pipeline(
     except Exception as e:
         logger.error("[V3] Reference resolution error: %s", e)
         results["errors"].append(f"Reference resolution failed: {e}")
+        results["status"] = "failed"
         return results
 
     # Phase 4: Run structural calculations

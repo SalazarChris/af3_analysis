@@ -68,8 +68,132 @@ def resolve_reference(
     if "condition" in config_reference:
         ref_cond = config_reference["condition"]
         if ref_cond not in dataset.conditions:
+            # Fallback: allow a human-readable condition name (e.g. the raw
+            # AF3 output folder name supplied by the af3.py menu) to resolve
+            # to its canonical condition id. Ambiguous matches are rejected.
+            name_matches = sorted(
+                cid for cid, cond in dataset.conditions.items()
+                if cond.condition_name == ref_cond
+            )
+            if len(name_matches) == 1:
+                resolved = name_matches[0]
+                result["reference_condition"] = resolved
+                result["reference_strategy"] = "explicit_reference_by_name"
+                result["resolved_from_name"] = ref_cond
+                result["paired_conditions"] = [
+                    (resolved, cond)
+                    for cond in dataset.conditions.keys()
+                    if cond != resolved
+                ]
+                return result
+            if len(name_matches) > 1:
+                # Ambiguous name: try the stem-candidate map before failing
+                # (the stem map is built from the registry's replicate_ids
+                # and may resolve the ambiguity by prediction count).
+                stem_candidates_amb = getattr(
+                    dataset, "condition_stem_candidates", {}
+                ) or {}
+                stem_matches_amb = sorted(
+                    stem_candidates_amb.get(ref_cond, [])
+                )
+                if len(stem_matches_amb) > 1:
+                    def _n_preds(cid: str) -> int:
+                        cond = dataset.conditions.get(cid)
+                        return cond.n_predictions if cond else 0
+
+                    counts_amb = {
+                        cid: _n_preds(cid) for cid in stem_matches_amb
+                    }
+                    best_amb = max(counts_amb.values())
+                    top_amb = sorted(
+                        cid for cid, n in counts_amb.items()
+                        if n == best_amb
+                    )
+                    if len(top_amb) == 1:
+                        resolved = top_amb[0]
+                        result["reference_condition"] = resolved
+                        result["reference_strategy"] = (
+                            "explicit_reference_by_stem_disambiguated"
+                        )
+                        result["resolved_from_stem"] = ref_cond
+                        result["disambiguated_alternatives"] = sorted(
+                            cid for cid in stem_matches_amb
+                            if cid != resolved
+                        )
+                        result["disambiguation_note"] = (
+                            f"Ambiguous name '{ref_cond}' matched "
+                            f"{stem_matches_amb}; selected '{resolved}' "
+                            f"({counts_amb[resolved]} predictions); "
+                            f"alternatives: "
+                            f"{sorted(cid for cid in stem_matches_amb if cid != resolved)}"
+                        )
+                        return result
+                    raise ReferenceResolutionError(
+                        f"Reference condition '{ref_cond}' is ambiguous "
+                        f"between {top_amb} (equal prediction counts). "
+                        f"Specify the exact condition id instead."
+                    )
+                raise ReferenceResolutionError(
+                    f"Reference condition '{ref_cond}' matches multiple "
+                    f"condition names: {name_matches}. Specify the exact "
+                    f"condition id instead."
+                )
+            # Second fallback: raw CIF condition stem (e.g. the AF3 output
+            # folder name). Authoritative mapping built by the adapter from
+            # condition_registry.csv replicate_ids. Ambiguous stems are
+            # rejected rather than silently choosing one condition.
+            stem_candidates = getattr(
+                dataset, "condition_stem_candidates", {}
+            ) or {}
+            stem_matches = sorted(stem_candidates.get(ref_cond, []))
+            if len(stem_matches) == 1:
+                resolved = stem_matches[0]
+                result["reference_condition"] = resolved
+                result["reference_strategy"] = "explicit_reference_by_stem"
+                result["resolved_from_stem"] = ref_cond
+                return result
+            if len(stem_matches) > 1:
+                # The same stem can legitimately map to several condition
+                # ids (e.g. a legacy fragment and the full condition in one
+                # registry). Disambiguate deterministically by prediction
+                # count and record the decision explicitly; never choose
+                # silently.
+                def _n_preds(cid: str) -> int:
+                    cond = dataset.conditions.get(cid)
+                    return cond.n_predictions if cond else 0
+
+                counts = {cid: _n_preds(cid) for cid in stem_matches}
+                best = max(counts.values())
+                top = sorted(
+                    cid for cid, n in counts.items() if n == best
+                )
+                if len(top) > 1:
+                    raise ReferenceResolutionError(
+                        f"Reference stem '{ref_cond}' is ambiguous between "
+                        f"{top} (equal prediction counts). Specify the "
+                        f"exact condition id instead."
+                    )
+                resolved = top[0]
+                result["reference_condition"] = resolved
+                result["reference_strategy"] = (
+                    "explicit_reference_by_stem_disambiguated"
+                )
+                result["resolved_from_stem"] = ref_cond
+                result["disambiguated_alternatives"] = sorted(
+                    cid for cid in stem_matches if cid != resolved
+                )
+                result["disambiguation_note"] = (
+                    f"Stem '{ref_cond}' matched {stem_matches}; selected "
+                    f"'{resolved}' ({counts[resolved]} predictions); "
+                    f"alternatives: "
+                    f"{sorted(cid for cid in stem_matches if cid != resolved)}"
+                )
+                return result
             raise ReferenceResolutionError(
-                f"Reference condition '{ref_cond}' not in dataset"
+                f"Reference condition '{ref_cond}' not in dataset. "
+                f"Available condition ids: {sorted(dataset.conditions.keys())}; "
+                f"condition names: "
+                f"{sorted(c.condition_name for c in dataset.conditions.values())}"
             )
         result["reference_condition"] = ref_cond
         result["reference_strategy"] = "explicit_reference"

@@ -119,12 +119,16 @@ def adapt_from_pipeline(
 
     # Phase 5: Load structures if raw_af3_root provided
     predictions = {}
+    stem_map: Dict[str, str] = {}
+    stem_candidates: Dict[str, List[str]] = {}
     if raw_af3_root is not None and raw_af3_root.exists():
         logger.info("[V3 Adapter] Loading structures from %s", raw_af3_root)
         # CIF filenames carry the condition stem (e.g. 'pou_baseline'); the run
         # tables carry condition_id (e.g. 'cond_001'). Build the stem -> id map
         # so predictions align with conditions/seeds for matched-seed pairing.
-        stem_map = _build_condition_stem_map(run_dir, seed_aggregated)
+        stem_map, stem_candidates = _build_condition_stem_map(
+            run_dir, seed_aggregated
+        )
         predictions, qc_records = _load_structures(
             raw_af3_root, seed_aggregated, experiment_metadata, stem_map=stem_map
         )
@@ -147,6 +151,25 @@ def adapt_from_pipeline(
     if reference_condition is None and conditions:
         reference_condition = sorted(conditions.keys())[0]
 
+    # Resolve human-supplied names/stems (e.g. the raw AF3 output folder
+    # name from the af3.py menu) to canonical condition ids. Ambiguous or
+    # unresolvable references are left as-is; resolve_reference() reports
+    # them explicitly instead of silently choosing a condition.
+    if (
+        reference_condition is not None
+        and reference_condition not in conditions
+    ):
+        name_matches = sorted(
+            cid for cid, cond in conditions.items()
+            if cond.condition_name == reference_condition
+        )
+        if len(name_matches) == 1:
+            reference_condition = name_matches[0]
+        else:
+            stem_matches = stem_candidates.get(reference_condition, [])
+            if len(stem_matches) == 1:
+                reference_condition = stem_matches[0]
+
     # Phase 7: Build dataset
     dataset = Dataset(
         name=run_dir.name,
@@ -154,9 +177,10 @@ def adapt_from_pipeline(
         seeds=seeds,
         predictions=predictions,
         reference_condition=reference_condition,
+        condition_stem_map=stem_map,
+        condition_stem_candidates=stem_candidates,
         experiment_metadata=experiment_metadata,
     )
-
     logger.info("[V3 Adapter] Dataset built: %d conditions, %d predictions",
                 len(conditions), sum(
                     sum(len(sp.values()) for sp in cond_preds.values())
@@ -238,7 +262,7 @@ def _build_seed_summaries(
 def _build_condition_stem_map(
     run_dir: Path,
     seed_aggregated: pd.DataFrame,
-) -> Dict[str, str]:
+) -> Tuple[Dict[str, str], Dict[str, List[str]]]:
     """
     Map CIF filename condition stems to run condition_ids.
 
@@ -250,10 +274,13 @@ def _build_condition_stem_map(
 
     Returns
     -------
-    stem -> condition_id dict. Unmapped stems fall back to themselves in
-    _load_structures.
+    (stem_map, stem_candidates)
+        stem_map: stem -> first condition_id (deterministic, used for CIF
+        lookup). stem_candidates: stem -> ALL condition_ids sharing the
+        stem, used to detect reference-name ambiguity.
     """
     stem_map: Dict[str, str] = {}
+    stem_candidates: Dict[str, List[str]] = {}
 
     # Source 1: condition_registry.csv replicate_ids (authoritative stems).
     # Example: 'oct4__k123-sumo_seed-10_sample-1' -> stem 'oct4__k123-sumo'
@@ -276,6 +303,9 @@ def _build_condition_stem_map(
                     stem = _replicate_to_stem(rep)
                     if stem:
                         stem_map.setdefault(stem, condition_id)
+                        candidates = stem_candidates.setdefault(stem, [])
+                        if condition_id not in candidates:
+                            candidates.append(condition_id)
         except Exception as e:
             logger.warning("[V3 Adapter] Could not read condition_registry.csv: %s", e)
 
@@ -286,8 +316,11 @@ def _build_condition_stem_map(
             condition_id = str(row["condition_id"])
             if name:
                 stem_map.setdefault(name, condition_id)
+                candidates = stem_candidates.setdefault(name, [])
+                if condition_id not in candidates:
+                    candidates.append(condition_id)
 
-    return stem_map
+    return stem_map, stem_candidates
 
 
 def _replicate_to_stem(replicate_id: str) -> Optional[str]:

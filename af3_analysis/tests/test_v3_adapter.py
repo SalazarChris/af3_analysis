@@ -78,8 +78,11 @@ class TestBuildConditionStemMap:
             "seed": [10],
             "pLDDT_mean": [80.0],
         })
-        stem_map = _build_condition_stem_map(tmp_path, seed_aggregated)
+        stem_map, stem_candidates = _build_condition_stem_map(
+            tmp_path, seed_aggregated
+        )
         assert stem_map["pou_baseline"] == "cond_001"
+        assert stem_candidates["pou_baseline"] == ["cond_001"]
 
     def test_condition_name_fallback_without_registry(self, tmp_path):
         seed_aggregated = pd.DataFrame({
@@ -88,16 +91,35 @@ class TestBuildConditionStemMap:
             "seed": [1, 2],
             "pLDDT_mean": [80.0, 81.0],
         })
-        stem_map = _build_condition_stem_map(tmp_path, seed_aggregated)
+        stem_map, stem_candidates = _build_condition_stem_map(
+            tmp_path, seed_aggregated
+        )
         assert stem_map["pou_sep102"] == "cond_002"
+        assert stem_candidates["pou_sep102"] == ["cond_002"]
 
     def test_missing_registry_is_silent(self, tmp_path):
         seed_aggregated = pd.DataFrame({
             "condition_id": ["cond_001"],
             "condition_name": ["pou_baseline"],
         })
-        stem_map = _build_condition_stem_map(tmp_path, seed_aggregated)
+        stem_map, stem_candidates = _build_condition_stem_map(
+            tmp_path, seed_aggregated
+        )
         assert stem_map["pou_baseline"] == "cond_001"
+        assert stem_candidates["pou_baseline"] == ["cond_001"]
+
+    def test_shared_stem_records_all_candidates(self, tmp_path):
+        """The same stem can map to multiple condition ids (legacy
+        fragment + full condition); the candidate map must record both."""
+        seed_aggregated = pd.DataFrame({
+            "condition_id": ["cond_001", "cond_002"],
+            "condition_name": ["pou_baseline", "pou_baseline"],
+        })
+        stem_map, stem_candidates = _build_condition_stem_map(
+            tmp_path, seed_aggregated
+        )
+        assert stem_map["pou_baseline"] == "cond_001"
+        assert stem_candidates["pou_baseline"] == ["cond_001", "cond_002"]
 
 
 # ---------------------------------------------------------------------------
