@@ -57,7 +57,7 @@ def run_complete_analysis_pipeline():
     
     # Get input directory
     print(f"  {CYAN}Step 1:{RESET} AF3 predictions directory")
-    print(f"  {DIM}Each subfolder = one condition (pou_*, etc){RESET}")
+    print(f"  {DIM}Each subfolder = one condition{RESET}")
     print(f"  {DIM}Type '?' to browse directories interactively.{RESET}")
     
     try:

@@ -16,16 +16,16 @@ Usage
 Examples
 --------
   # Sweep CA, MG, ZN combined at copies 1, 2, 5, 10 for a single JSON:
-  python add_ions.py tests/oct4_seg_chain_A.json --ligands CA,MG,ZN --counts 1,2,5,10
+  python add_ions.py <input.json> --ligands CA,MG,ZN --counts 1,2,5,10
 
   # One file per ligand instead of combined:
-  python add_ions.py tests/oct4_seg_chain_A.json --ligands CA,MG,ZN --counts 1,2,5 --separate
+  python add_ions.py <input.json> --ligands CA,MG,ZN --counts 1,2,5 --separate
 
   # Add a custom SMILES molecule at varying copies:
-  python add_ions.py tests/oct4_seg_chain_A.json --smiles "O=C(O)CC(N)C(=O)O" --counts 1,3,5
+  python add_ions.py <input.json> --smiles "O=C(O)CC(N)C(=O)O" --counts 1,3,5
 
-  # Process all oct4_seg PTM files in tests/, sweep common ions:
-  python add_ions.py tests/ --ligands CA,MG,NA,CL --counts 1,5,10
+  # Process all JSON files in a directory, sweeping common ions:
+  python add_ions.py <input_dir>/ --ligands CA,MG,NA,CL --counts 1,5,10
 """
 
 import sys

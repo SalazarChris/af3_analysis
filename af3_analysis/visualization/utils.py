@@ -88,7 +88,7 @@ def get_condition_order(conditions: list, schema: dict = None) -> list:
         order = schema['condition_order']
         return [c for c in order if c in conditions] + [c for c in conditions if c not in order]
     
-    # Alphabetical fallback (no POU-specific hard-coding)
+    # Alphabetical fallback (no dataset-specific hard-coding)
     return sorted(list(conditions))
 
 

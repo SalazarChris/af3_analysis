@@ -752,7 +752,7 @@ def _molecule_status_line(jb) -> str:
 def _qs_stop1_name(jb):
     _bus_banner(1, "Job Name")
     _tip("Give this prediction a short name - just a label for your own reference.\n"
-         "     Example: my_protein  or  kinase_atp_complex")
+         "     Example: my_protein  or  my_complex")
     print()
     name = _ask("Job name", default="my_job")
     jb.set_name(name)

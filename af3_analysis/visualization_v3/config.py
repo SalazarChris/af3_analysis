@@ -103,7 +103,8 @@ class V3Config:
 
     # Reference resolution
     reference: Optional[Dict[str, Any]] = field(default_factory=dict)
-    # Example: {"condition": "pou_baseline"} or {"condition_a": "X", "condition_b": "Y"}
+    # Example: {"condition": "<condition_id_or_name>"} or
+    # {"condition_a": "X", "condition_b": "Y"}
 
     # Figure toggles
     figures: Dict[str, bool] = field(default_factory=dict)

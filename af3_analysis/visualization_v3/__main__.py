@@ -77,7 +77,7 @@ def create_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="LABEL:CHAIN:RESIDUE[:RADIUS]",
         help="Local-geometry site for figure F10, repeatable. "
-             "Example: --site active_site:A:101:8.0",
+             "Example: --site my_site:A:101:8.0",
     )
 
     parser.add_argument(
@@ -86,7 +86,7 @@ def create_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="LABEL:CHAIN:START:END",
         help="Domain/region definition for figure F11, repeatable. "
-             "Example: --region POU_Specific:A:1:65",
+             "Example: --region my_domain:A:1:65",
     )
 
     parser.add_argument(
@@ -273,7 +273,7 @@ def _with_sites(v3_config: V3Config, site_specs: list) -> V3Config:
             raise SystemExit(
                 f"Invalid --site spec '{spec}'. "
                 "Expected LABEL:CHAIN:RESIDUE[:RADIUS] "
-                "e.g. --site active_site:A:101:8.0"
+                "e.g. --site my_site:A:101:8.0"
             )
         label, chain, residue = parts[0], parts[1], parts[2]
         try:
@@ -307,7 +307,7 @@ def _with_regions(v3_config: V3Config, region_specs: list) -> V3Config:
             raise SystemExit(
                 f"Invalid --region spec '{spec}'. "
                 "Expected LABEL:CHAIN:START:END "
-                "e.g. --region POU_Specific:A:1:65"
+                "e.g. --region my_domain:A:1:65"
             )
         label, chain, start, end = parts
         try:

@@ -24,7 +24,7 @@ import pandas as pd
 class FactorialContrast:
     """One factorial contrast result."""
 
-    contrast_id: str  # e.g., "main_DNA", "interaction_DNA_pTPO101"
+    contrast_id: str  # e.g., "main_<factor>", "interaction_<factorA>_<factorB>"
     contrast_type: str  # "main", "interaction"
     factors: List[str]  # involved factors
     estimate: Optional[float] = None

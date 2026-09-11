@@ -9,7 +9,7 @@ Usage::
     from af3_builder.condition_manifest import MasterManifest, build_job
 
     manifest = MasterManifest.load_from_csvs("registries/")
-    job = build_job(manifest, "pou_tpo101", seeds=[1, 2, 3])
+    job = build_job(manifest, "<condition_id>", seeds=[1, 2, 3])
     # job is a fully populated JobBuilder ready to serialize
 
 Validation order enforced in build_job:
@@ -506,7 +506,8 @@ def _validate_spec_for_build(
             )
 
     # 3. Validate modification CCD codes
-    #    Separate-entity modifications (e.g. SUMO, Ubiquitin) do NOT have
+    #    Separate-entity modifications (modifier proteins attached as
+    #    their own entity) do NOT have
     #    a single CCD code — they are represented as distinct protein
     #    entities with covalent bonds.  Skip the CCD check for those.
     for protein in spec.proteins:

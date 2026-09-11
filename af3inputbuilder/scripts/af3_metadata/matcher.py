@@ -75,7 +75,7 @@ class ConditionMatcher:
         """Strategy C: Pattern-based matching."""
         conditions = self.registry.get_all_conditions()
         
-        # Try to extract base name (e.g., 'pou_baseline' from 'pou_baseline_na100_hoh1000_cl100')
+        # Try to extract base name (e.g., '<base>' from '<base>_na100_hoh1000_cl100')
         base_patterns = self._extract_base_patterns(folder_name)
         
         for cond in conditions:
@@ -89,7 +89,7 @@ class ConditionMatcher:
                 if cond_name == base_pattern:
                     return cond
                     
-            # Try substring match (for cases like 'pou_dna' matching 'pou_dna_na100')
+            # Try substring match (for cases like '<cond_a>' matching '<cond_a>_na100')
             if folder_name.startswith(cond_name + '_') or folder_name.startswith(cond_name):
                 return cond
                 

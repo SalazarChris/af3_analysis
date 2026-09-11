@@ -123,8 +123,8 @@ def adapt_from_pipeline(
     stem_candidates: Dict[str, List[str]] = {}
     if raw_af3_root is not None and raw_af3_root.exists():
         logger.info("[V3 Adapter] Loading structures from %s", raw_af3_root)
-        # CIF filenames carry the condition stem (e.g. 'pou_baseline'); the run
-        # tables carry condition_id (e.g. 'cond_001'). Build the stem -> id map
+        # CIF filenames carry the condition stem; the run
+        # tables carry condition_id. Build the stem -> id map
         # so predictions align with conditions/seeds for matched-seed pairing.
         stem_map, stem_candidates = _build_condition_stem_map(
             run_dir, seed_aggregated
@@ -266,9 +266,9 @@ def _build_condition_stem_map(
     """
     Map CIF filename condition stems to run condition_ids.
 
-    The AF3 CIF files are named by their condition stem (e.g.
-    'pou_baseline_seed-10_sample-0_model.cif'), while the run tables use
-    generated condition_ids (e.g. 'cond_001'). The authoritative bridge is
+    The AF3 CIF files are named by their condition stem
+    (<stem>_seed-N_sample-M_model.cif), while the run tables use
+    generated condition_ids. The authoritative bridge is
     condition_registry.csv's replicate_ids (which embed the stem) and the
     seed_aggregated condition_name column.
 
@@ -283,7 +283,7 @@ def _build_condition_stem_map(
     stem_candidates: Dict[str, List[str]] = {}
 
     # Source 1: condition_registry.csv replicate_ids (authoritative stems).
-    # Example: 'oct4__k123-sumo_seed-10_sample-1' -> stem 'oct4__k123-sumo'
+    # Example: '<stem>_seed-10_sample-1' -> stem '<stem>'
     registry = run_dir / "tables" / "condition_registry.csv"
     if registry.is_file():
         try:
@@ -328,10 +328,10 @@ def _replicate_to_stem(replicate_id: str) -> Optional[str]:
     Reduce a replicate id to its CIF condition stem.
 
     Examples:
-      'pou_baseline_seed-10_sample-0' -> 'pou_baseline'
-      'pou_baseline_seed-10_sample-0_summary' -> 'pou_baseline'
-      'pou_baseline_summary' -> 'pou_baseline'
-      'pou_baseline' -> 'pou_baseline'
+      '<stem>_seed-10_sample-0' -> '<stem>'
+      '<stem>_seed-10_sample-0_summary' -> '<stem>'
+      '<stem>_summary' -> '<stem>'
+      '<stem>' -> '<stem>'
     """
     stem = re.sub(r"_seed-\d+_sample-\d+_summary$", "", replicate_id)
     stem = re.sub(r"_seed-\d+_sample-\d+$", "", stem)
@@ -516,7 +516,7 @@ def _convert_to_structure_data(
         ))
 
     # Confidence metrics from the AF3 confidences JSON that sits beside the
-    # model CIF (e.g. pou_baseline_seed-10_sample-0_confidences.json).
+    # model CIF (e.g. <stem>_seed-N_sample-M_confidences.json).
     confidence = _load_confidence_metrics(structure.source_path)
     plddt_mean = confidence.get("plddt_mean")
     plddt_min = confidence.get("plddt_min")

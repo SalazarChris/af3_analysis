@@ -6,13 +6,16 @@ AF3 Smoke Test Runner
 Minimal end-to-end smoke test of the condition_manifest → JobBuilder →
 AF3 JSON pipeline.
 
-Generates JSON files using EXISTING pipeline, validates them, and records
-results.  Does NOT submit to AF3 automatically — that requires manual
-submission or a separate AF3 client.
+Conditions are DISCOVERED from the master condition manifests under the
+registries root — nothing about any specific experiment is hard-coded here.
+Generates JSON files using the EXISTING pipeline, validates them, and
+records results.  Does NOT submit to AF3 automatically — that requires
+manual submission or a separate AF3 client.
 
 Usage::
 
-    python smoke_test/run_smoke_test.py
+    python smoke_test/run_smoke_test.py [--registries-root DIR] [--seed N]
+                                        [--conditions ID1,ID2,...]
 
 Or programmatically::
 
@@ -22,6 +25,7 @@ Or programmatically::
 
 from __future__ import annotations
 
+import argparse
 import csv
 import json
 import os
@@ -34,7 +38,7 @@ from typing import Any, Dict, List, Optional, Tuple
 # Bootstrap path
 _HERE = Path(__file__).resolve().parent          # smoke_test/
 _AF3BUILDER = _HERE.parent                       # af3inputbuilder/
-_REPO_ROOT = _AF3BUILDER.parent                  # FINALVERSIONTHESIS/
+_REPO_ROOT = _AF3BUILDER.parent                  # repository root
 if str(_AF3BUILDER) not in sys.path:
     sys.path.insert(0, str(_AF3BUILDER))
 
@@ -62,14 +66,15 @@ from af3_builder.validation.validator import AF3Validator, ValidationError
 # Paths
 # ---------------------------------------------------------------------------
 
-POU_DIR = _REPO_ROOT / "testdata" / "pou2" / "registries"
-PX_DIR = _REPO_ROOT / "testdata" / "protein_x" / "registries"
+# Registry manifests live in per-dataset subdirectories of this root.
+# The root itself is data; this script contains no dataset names.
+DEFAULT_REGISTRIES_ROOT = _REPO_ROOT / "testdata" / "registries"
 OUTPUT_DIR = _HERE / "json"
 RESULTS_DIR = _HERE / "results"
 
 
 # ---------------------------------------------------------------------------
-# Smoke-test matrix definition
+# Smoke-test entry
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -97,124 +102,109 @@ class SmokeTestEntry:
     timestamp: str = ""
 
 
-# The 8 mandatory categories, mapped to EXISTING conditions
-SMOKE_TEST_MATRIX: List[SmokeTestEntry] = [
-    # POU/OCT4 dataset
-    SmokeTestEntry(
-        dataset="pou2",
-        condition_id="pou_baseline",
-        category="A",
-        description="Unmodified protein (baseline)",
-    ),
-    SmokeTestEntry(
-        dataset="pou2",
-        condition_id="pou_tpo101",
-        category="B",
-        description="Protein + 1 verified PTM (pTPO101)",
-    ),
-    SmokeTestEntry(
-        dataset="pou2",
-        condition_id="pou_tpo101_sep102",
-        category="C",
-        description="Protein + 2 verified PTMs (pTPO101 + pSEP102)",
-    ),
-    SmokeTestEntry(
-        dataset="pou2",
-        condition_id="pou_dna",
-        category="D",
-        description="Protein + DNA",
-    ),
-    SmokeTestEntry(
-        dataset="pou2",
-        condition_id="pou_tpo101_dna",
-        category="E",
-        description="Protein + PTM + DNA",
-    ),
-    SmokeTestEntry(
-        dataset="pou2",
-        condition_id="pou_tpo101_sep102_dna",
-        category="E_extended",
-        description="Protein + 2 PTMs + DNA (bonus)",
-    ),
-    SmokeTestEntry(
-        dataset="pou2",
-        condition_id="pou_baseline",
-        category="G",
-        description="Protein + ion (MG, from baseline)",
-    ),
-    # Protein X dataset
-    SmokeTestEntry(
-        dataset="protein_x",
-        condition_id="kinase_baseline",
-        category="A_px",
-        description="Protein-X baseline (genericity check)",
-    ),
-    SmokeTestEntry(
-        dataset="protein_x",
-        condition_id="kinase_ligand_A",
-        category="F",
-        description="Protein + ligand (ATP)",
-    ),
-    SmokeTestEntry(
-        dataset="protein_x",
-        condition_id="kinase_phospho",
-        category="B_px",
-        description="Protein-X + PTM (phospho_K42)",
-    ),
-    SmokeTestEntry(
-        dataset="protein_x",
-        condition_id="kinase_phospho_ligand",
-        category="H",
-        description="Protein + PTM + ligand",
-    ),
-    SmokeTestEntry(
-        dataset="protein_x",
-        condition_id="kinase_multi",
-        category="H_extended",
-        description="Protein + 2 PTMs + ligand (bonus)",
-    ),
-]
+def _registry_dirs(registries_root: Path) -> List[Path]:
+    """Enumerate registry directories under the root.
+
+    Supports both layouts without any dataset names:
+    - flat: <root>/master_condition_manifest.csv
+    - nested: <root>/<dataset>/master_condition_manifest.csv and
+      <root>/<dataset>/registries/master_condition_manifest.csv
+    """
+    if not registries_root.is_dir():
+        raise FileNotFoundError(
+            f"Registries root not found: {registries_root}"
+        )
+    found: Dict[Path, None] = {}
+    if (registries_root / "master_condition_manifest.csv").is_file():
+        found[registries_root.resolve()] = None
+    # Bounded scan: one and two levels below the root.
+    for pattern in ("*/master_condition_manifest.csv",
+                    "*/*/master_condition_manifest.csv"):
+        for manifest_path in registries_root.glob(pattern):
+            found[manifest_path.parent.resolve()] = None
+    dirs = sorted(found.keys())
+    if not dirs:
+        raise FileNotFoundError(
+            f"No directories containing "
+            f"'master_condition_manifest.csv' found under {registries_root}"
+        )
+    return dirs
+
+
+def _dataset_label(registry_dir: Path, registries_root: Path) -> str:
+    """Stable display label for a registry directory (data-derived)."""
+    if registry_dir.name != "registries" and registry_dir != registries_root.resolve():
+        return registry_dir.name
+    return registry_dir.parent.name
+
+
+def _discover_entries(
+    registries_root: Path,
+    condition_filter: Optional[List[str]] = None,
+) -> Tuple[List[SmokeTestEntry], Dict[str, Path]]:
+    """Discover smoke-test entries from manifest CSVs.
+
+    Every condition in every discovered manifest gets one entry. No
+    condition names, categories, or descriptions are hard-coded; category
+    labels are generated positionally and are stable only within one run.
+
+    Returns (entries, registry_dirs_by_label).
+    """
+    entries: List[SmokeTestEntry] = []
+    dirs_by_label: Dict[str, Path] = {}
+    for registry_dir in _registry_dirs(registries_root):
+        label = _dataset_label(registry_dir, registries_root)
+        dirs_by_label[label] = registry_dir
+        manifest = load_master_manifest(
+            registry_dir / "master_condition_manifest.csv",
+            modifications_path=registry_dir / "condition_modifications.csv",
+            entities_path=registry_dir / "condition_entities.csv",
+            factors_path=registry_dir / "condition_factors.csv",
+        )
+        for k, cid in enumerate(manifest.condition_ids, start=1):
+            if condition_filter and cid not in condition_filter:
+                continue
+            entries.append(SmokeTestEntry(
+                dataset=label,
+                condition_id=cid,
+                category=f"C{k:02d}",
+                description="",
+            ))
+    if condition_filter:
+        discovered_ids = {e.condition_id for e in entries}
+        missing = sorted(set(condition_filter) - discovered_ids)
+        if missing:
+            raise ValueError(
+                f"Requested condition(s) not found in any manifest: {missing}"
+            )
+    return entries, dirs_by_label
 
 
 # ---------------------------------------------------------------------------
-# Registry loading (load once)
+# Registry loading (per dataset directory)
 # ---------------------------------------------------------------------------
 
-def _load_registries(dataset: str) -> Dict[str, Any]:
-    """Load all registries for a dataset."""
-    if dataset == "pou2":
-        d = POU_DIR
-    elif dataset == "protein_x":
-        d = PX_DIR
-    else:
-        raise ValueError(f"Unknown dataset: {dataset}")
-
+def _load_registries(registry_dir: Path) -> Dict[str, Any]:
+    """Load all registries from one dataset registry directory."""
     return {
-        "protein_registry": load_protein_registry(d / "protein_registry.csv"),
-        "construct_registry": load_construct_registry(d / "construct_registry.csv"),
-        "modification_registry": load_modification_registry(d / "modification_registry.csv"),
-        "nucleic_acid_registry": load_nucleic_acid_registry(d / "nucleic_acid_registry.csv"),
-        "ligand_registry": load_ligand_registry(d / "ligand_registry.csv"),
-        "ion_registry": load_ion_registry(d / "ion_registry.csv"),
-        "af3_compatibility_registry": load_af3_compatibility_registry(d / "af3_compatibility_registry.csv"),
-        "covalent_bond_registry": load_covalent_bond_registry(d / "covalent_bond_registry.csv"),
+        "protein_registry": load_protein_registry(registry_dir / "protein_registry.csv"),
+        "construct_registry": load_construct_registry(registry_dir / "construct_registry.csv"),
+        "modification_registry": load_modification_registry(registry_dir / "modification_registry.csv"),
+        "nucleic_acid_registry": load_nucleic_acid_registry(registry_dir / "nucleic_acid_registry.csv"),
+        "ligand_registry": load_ligand_registry(registry_dir / "ligand_registry.csv"),
+        "ion_registry": load_ion_registry(registry_dir / "ion_registry.csv"),
+        "af3_compatibility_registry": load_af3_compatibility_registry(registry_dir / "af3_compatibility_registry.csv"),
+        "covalent_bond_registry": load_covalent_bond_registry(registry_dir / "covalent_bond_registry.csv"),
     }
 
 
-def _load_manifest(dataset: str):
-    """Load the master manifest for a dataset."""
-    if dataset == "pou2":
-        d = POU_DIR
-    elif dataset == "protein_x":
-        d = PX_DIR
-    else:
-        raise ValueError(f"Unknown dataset: {dataset}")
-
+def _load_manifest(registry_dir: Path):
+    """Load the master manifest for one dataset registry directory."""
     return load_master_manifest(
-        d / "master_condition_manifest.csv",
-        modifications_path=d / "condition_modifications.csv",
-        entities_path=d / "condition_entities.csv",
-        factors_path=d / "condition_factors.csv",
+        registry_dir / "master_condition_manifest.csv",
+        modifications_path=registry_dir / "condition_modifications.csv",
+        entities_path=registry_dir / "condition_entities.csv",
+        factors_path=registry_dir / "condition_factors.csv",
     )
 
 
@@ -321,6 +311,7 @@ def _run_single_test(
     return entry
 
 
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -328,15 +319,23 @@ def _run_single_test(
 def run_smoke_tests(
     seed: int = 1,
     matrix: Optional[List[SmokeTestEntry]] = None,
+    registries_root: Path = None,
+    condition_filter: Optional[List[str]] = None,
 ) -> List[SmokeTestEntry]:
-    """Run the full smoke-test matrix.
+    """Run the smoke-test matrix.
 
     Parameters
     ----------
     seed : int
         Seed value for all jobs.
     matrix : list, optional
-        Override the default smoke-test matrix.
+        Explicit entries. When omitted, entries are discovered from the
+        registries root.
+    registries_root : Path, optional
+        Root containing per-dataset registry directories. Defaults to
+        DEFAULT_REGISTRIES_ROOT.
+    condition_filter : list of str, optional
+        Restrict to these condition ids (discovery mode only).
 
     Returns
     -------
@@ -344,7 +343,12 @@ def run_smoke_tests(
         Results for each tested condition.
     """
     if matrix is None:
-        matrix = SMOKE_TEST_MATRIX
+        matrix, dirs_by_label = _discover_entries(
+            registries_root or DEFAULT_REGISTRIES_ROOT,
+            condition_filter,
+        )
+    else:
+        dirs_by_label = {}
 
     # Ensure output dirs exist
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -368,8 +372,13 @@ def run_smoke_tests(
 
         # Load data (cached per dataset)
         if ds not in cache:
+            registry_dir = dirs_by_label.get(ds)
+            if registry_dir is None:
+                registry_dir = (
+                    (registries_root or DEFAULT_REGISTRIES_ROOT) / ds
+                )
             print(f"  Loading {ds} registries...")
-            cache[ds] = (_load_manifest(ds), _load_registries(ds))
+            cache[ds] = (_load_manifest(registry_dir), _load_registries(registry_dir))
 
         manifest, registries = cache[ds]
 
@@ -440,5 +449,46 @@ def _write_results_csv(
 # Main
 # ---------------------------------------------------------------------------
 
+def _main() -> int:
+    parser = argparse.ArgumentParser(
+        description="AF3 condition-manifest smoke test (conditions are "
+                    "discovered from manifest CSVs)"
+    )
+    parser.add_argument(
+        "--registries-root",
+        type=str,
+        default=str(DEFAULT_REGISTRIES_ROOT),
+        help="Root directory containing per-dataset registry folders "
+             "(each with master_condition_manifest.csv)",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=1,
+        help="Seed for generated jobs (default: 1)",
+    )
+    parser.add_argument(
+        "--conditions",
+        type=str,
+        default=None,
+        help="Comma-separated condition ids to restrict the run "
+             "(default: all discovered conditions)",
+    )
+    args = parser.parse_args()
+
+    condition_filter = None
+    if args.conditions:
+        condition_filter = [
+            c.strip() for c in args.conditions.split(",") if c.strip()
+        ]
+
+    results = run_smoke_tests(
+        seed=args.seed,
+        registries_root=Path(args.registries_root),
+        condition_filter=condition_filter,
+    )
+    return 0 if all(r.generated_json for r in results) else 1
+
+
 if __name__ == "__main__":
-    run_smoke_tests(seed=1)
+    sys.exit(_main())
