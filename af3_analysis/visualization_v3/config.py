@@ -7,10 +7,8 @@ All fields have project-agnostic defaults. No biological assumptions.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import json
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -212,18 +210,6 @@ class V3Config:
             "output_format": self.output_format,
             "verbose": self.verbose,
         }
-
-
-def load_v3_config(config_path: str) -> V3Config:
-    """Load V3 configuration from JSON file."""
-    path = Path(config_path)
-    if not path.exists():
-        raise FileNotFoundError(f"V3 configuration file not found: {path}")
-
-    with open(path, "r") as f:
-        data = json.load(f)
-
-    return V3Config.from_dict(data)
 
 
 def create_v3_config_interactive(

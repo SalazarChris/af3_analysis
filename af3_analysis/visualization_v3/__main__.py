@@ -17,7 +17,7 @@ import logging
 import sys
 from pathlib import Path
 
-from .config import V3Config, load_v3_config
+from .config import V3Config
 from .runner import run_v3_pipeline
 
 
@@ -56,25 +56,54 @@ def create_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
-        "--config",
-        type=str,
-        default=None,
-        help="Path to V3 JSON configuration file",
-    )
-
-    parser.add_argument(
         "--figures",
         type=str,
         default=None,
         help="Comma-separated figure IDs to generate (e.g. F01,F02,F12). "
-             "Default: all enabled figures from config",
+             "Default: all figures enabled",
     )
 
     parser.add_argument(
         "--reference",
         type=str,
         default=None,
-        help="Reference condition id (overrides config)",
+        help="Reference condition id (all structural differences are "
+             "computed relative to this condition)",
+    )
+
+    parser.add_argument(
+        "--site",
+        action="append",
+        default=None,
+        metavar="LABEL:CHAIN:RESIDUE[:RADIUS]",
+        help="Local-geometry site for figure F10, repeatable. "
+             "Example: --site active_site:A:101:8.0",
+    )
+
+    parser.add_argument(
+        "--region",
+        action="append",
+        default=None,
+        metavar="LABEL:CHAIN:START:END",
+        help="Domain/region definition for figure F11, repeatable. "
+             "Example: --region POU_Specific:A:1:65",
+    )
+
+    parser.add_argument(
+        "--contact-distance",
+        type=float,
+        default=None,
+        metavar="ANGSTROM",
+        help="Contact-map distance cutoff in Angstrom (default: 8.0)",
+    )
+
+    parser.add_argument(
+        "--min-coverage",
+        type=float,
+        default=None,
+        metavar="FRACTION",
+        help="Minimum coordinate coverage for valid comparisons "
+             "(default: 0.80)",
     )
 
     parser.add_argument(
@@ -110,19 +139,32 @@ def main(args: list = None) -> int:
               file=sys.stderr)
         return 1
 
-    # Load configuration
-    if parsed.config:
-        v3_config = load_v3_config(parsed.config)
-    else:
-        v3_config = V3Config()
+    # Base configuration: defaults only, refined by CLI arguments below.
+    # No external config file is used.
+    v3_config = V3Config()
 
-    # CLI overrides
+    # CLI arguments
     if parsed.reference:
         # reference is a frozen dataclass field holding a dict; rebuild it
         v3_config = _with_reference(v3_config, parsed.reference)
     if parsed.figures:
         ids = [f.strip().upper() for f in parsed.figures.split(",") if f.strip()]
         v3_config = _with_figures(v3_config, ids)
+
+    if parsed.site:
+        v3_config = _with_sites(v3_config, parsed.site)
+
+    if parsed.region:
+        v3_config = _with_regions(v3_config, parsed.region)
+
+    if parsed.contact_distance is not None or parsed.min_coverage is not None:
+        from dataclasses import replace
+        structure = v3_config.structure
+        if parsed.contact_distance is not None:
+            structure = replace(structure, contact_distance=parsed.contact_distance)
+        if parsed.min_coverage is not None:
+            structure = replace(structure, minimum_coverage=parsed.min_coverage)
+        v3_config = replace(v3_config, structure=structure)
 
     # Overwrite protection
     v3_dir = run_dir / "v3"
@@ -191,6 +233,71 @@ def _with_figures(v3_config: V3Config, figure_ids: list) -> V3Config:
     for fig_id in all_ids:
         figures[fig_id] = fig_id in figure_ids
     return replace(v3_config, figures=figures)
+
+
+def _with_sites(v3_config: V3Config, site_specs: list) -> V3Config:
+    """Return a copy of the config with parsed --site definitions.
+
+    Each spec has the form LABEL:CHAIN:RESIDUE[:RADIUS]. RADIUS is optional
+    and defaults to the pipeline default (8.0 Angstrom).
+    """
+    sites = []
+    for spec in site_specs:
+        parts = [p.strip() for p in spec.split(":")]
+        if len(parts) not in (3, 4):
+            raise SystemExit(
+                f"Invalid --site spec '{spec}'. "
+                "Expected LABEL:CHAIN:RESIDUE[:RADIUS] "
+                "e.g. --site active_site:A:101:8.0"
+            )
+        label, chain, residue = parts[0], parts[1], parts[2]
+        try:
+            residue = int(residue)
+        except ValueError:
+            raise SystemExit(
+                f"Invalid --site spec '{spec}': RESIDUE must be an integer"
+            )
+        site = {"label": label, "chain": chain, "residue": residue}
+        if len(parts) == 4:
+            try:
+                site["radius"] = float(parts[3])
+            except ValueError:
+                raise SystemExit(
+                    f"Invalid --site spec '{spec}': RADIUS must be a number"
+                )
+        sites.append(site)
+    from dataclasses import replace
+    return replace(v3_config, sites=sites)
+
+
+def _with_regions(v3_config: V3Config, region_specs: list) -> V3Config:
+    """Return a copy of the config with parsed --region definitions.
+
+    Each spec has the form LABEL:CHAIN:START:END.
+    """
+    regions = []
+    for spec in region_specs:
+        parts = [p.strip() for p in spec.split(":")]
+        if len(parts) != 4:
+            raise SystemExit(
+                f"Invalid --region spec '{spec}'. "
+                "Expected LABEL:CHAIN:START:END "
+                "e.g. --region POU_Specific:A:1:65"
+            )
+        label, chain, start, end = parts
+        try:
+            start, end = int(start), int(end)
+        except ValueError:
+            raise SystemExit(
+                f"Invalid --region spec '{spec}': START and END must be integers"
+            )
+        if start > end:
+            raise SystemExit(
+                f"Invalid --region spec '{spec}': START must be <= END"
+            )
+        regions.append({"label": label, "chain": chain, "start": start, "end": end})
+    from dataclasses import replace
+    return replace(v3_config, regions=regions)
 
 
 if __name__ == "__main__":
