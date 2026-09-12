@@ -25,8 +25,10 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import time
 import traceback
+from collections import defaultdict
 from datetime import datetime, timezone
 from itertools import product
 from pathlib import Path
@@ -35,7 +37,12 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from .config import V3Config, get_enabled_figures
+from .config import (
+    V3Config,
+    V3_DEFAULT_OFF_FIGURES,
+    V3_F13_HIDDEN_VIEWS,
+    get_enabled_figures,
+)
 from .adapter import adapt_from_pipeline
 from .validation import (
     validate_condition_mapping,
@@ -304,7 +311,7 @@ def run_v3_pipeline(
         "F10": generate_f10_local_geometry,
         "F11": generate_f11_domain_motion,
         "F12": generate_f12_structural_clustering,
-        "F13": generate_f13_similarity_matrix,
+        "F13": _generate_f13_views,
         "F14": generate_f14_mds_embedding,
         "F15": generate_f15_confidence_geometry,
         "F16": generate_f16_confidence_change_vs_structural_change,
@@ -313,6 +320,21 @@ def run_v3_pipeline(
         "F19": generate_f19_factorial_effects,
         "F20": generate_f20_structure_confidence_matrix,
     }
+
+    # Remove stale top-level figure PNGs for figures that are no longer
+    # part of this run (e.g. demoted F12), so the figures directory always
+    # matches the manifest. F13 view-level cleanup happens inside
+    # _generate_f13_views (view files use f13a/f13b/f13d names that do not
+    # match the F<NN>_ pattern here).
+    enabled_ids = set(enabled_figures)
+    if v3_figures_dir.exists():
+        for png in v3_figures_dir.glob("fig_v3_f*.png"):
+            m = re.match(r"fig_v3_f(\d+)_", png.name)
+            if m and f"F{m.group(1)}" not in enabled_ids:
+                try:
+                    png.unlink()
+                except OSError:
+                    pass
 
     for fig_id in enabled_figures:
         if fig_id not in figure_generators:
@@ -364,6 +386,27 @@ def run_v3_pipeline(
             results["errors"].append(error_msg)
             # Continue with other figures
             continue
+
+    # Record suite-level consolidation decisions for provenance. These
+    # reflect the review's defaults (docs/V3_STRUCTURAL_VISUALIZATION_
+    # REVIEW.md); all demoted figures remain available via explicit
+    # opt-in, and F06's per-pair detail is consolidated into F07.
+    results["suite_notes"] = {
+        "consolidated": (
+            {"into": "F07", "from": ["F06"],
+             "detail": "per-pair contact changes rendered as F07 Panel C"}
+            if "F07" in results["figures"] else []
+        ),
+        "demoted_from_default": list(V3_DEFAULT_OFF_FIGURES),
+        "f13_hidden_views": {
+            "views": list(V3_F13_HIDDEN_VIEWS),
+            "detail": ("prediction-level matrices are not "
+                       "human-interpretable at scale; F13B "
+                       "(within-condition reproducibility) remains the "
+                       "default F13 view; re-enable via figures config "
+                       "entries F13A/F13D"),
+        },
+    }
 
     # Phase 6: Generate tables
     logger.info("[V3] Phase 6: Generating tables")
@@ -492,6 +535,10 @@ class FigureDataCache:
         # (full delta maps stay ephemeral to their computing figure so memory
         # does not grow with the number of comparisons)
         self.contact_diff_summary: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        # (ref_pid, target_pid) -> changed pairs only: pair -> +1/-1.
+        # Aggregated form of the delta map (zero deltas dropped) so F07 can
+        # consolidate F06's per-pair detail without caching full maps.
+        self.contact_pair_changes: Dict[Tuple[str, str], Dict[Any, int]] = {}
         # (pid, contact_distance) -> list of InterfaceContacts
         self.interfaces: Dict[Tuple[str, float], List[Any]] = {}
         # ("matched_seed", ref_condition, condition_id) -> list of results
@@ -507,6 +554,7 @@ class FigureDataCache:
             "rmsd_entries": len(self.rmsd),
             "displacement_entries": len(self.displacement),
             "contact_diff_summary_entries": len(self.contact_diff_summary),
+            "contact_pair_changes_entries": len(self.contact_pair_changes),
             "interface_entries": len(self.interfaces),
             "matched_seed_entries": len(self.matched_seed),
             "local_geometry_entries": len(self.local_geometry),
@@ -615,7 +663,52 @@ def _full_contact_diff(
             cache.contact_diff_summary[key] = {
                 k: diff[k] for k in _contact_diff_summary_keys()
             }
+        if key not in cache.contact_pair_changes:
+            cache.contact_pair_changes[key] = {
+                pair: d for pair, d in diff.get("delta_map", {}).items() if d != 0
+            }
     return diff
+
+
+def _cached_contact_diff_with_pairs(
+    cache: Optional[FigureDataCache],
+    ref_struct: Any,
+    target_struct: Any,
+    v3_config: V3Config,
+) -> Tuple[Dict[str, Any], Dict[Any, int]]:
+    """Scalar contact summary plus changed-pair detail for F07.
+
+    Returns ``(summary, pair_changes)`` where ``pair_changes`` maps each
+    changed residue pair to +1 (gained) or -1 (lost) for this single
+    comparison; aggregation across comparisons happens in the caller.
+    With a cache, both parts reuse the entries populated by F06 or a
+    previous F07 comparison, so the consolidated F07 never recomputes a
+    comparison already computed elsewhere. A None cache computes directly.
+    """
+    if cache is None:
+        ref_map = calculate_contact_map(
+            ref_struct, threshold=v3_config.structure.contact_distance)
+        target_map = calculate_contact_map(
+            target_struct, threshold=v3_config.structure.contact_distance)
+        diff = calculate_contact_difference(ref_map, target_map)
+        summary = {k: diff[k] for k in _contact_diff_summary_keys()}
+        pairs = {
+            pair: d for pair, d in diff.get("delta_map", {}).items() if d != 0
+        }
+        return summary, pairs
+    key = (ref_struct.prediction_id, target_struct.prediction_id)
+    if (
+        key in cache.contact_diff_summary
+        and key in cache.contact_pair_changes
+    ):
+        cache.n_hits += 1
+        return dict(cache.contact_diff_summary[key]), cache.contact_pair_changes[key]
+    cache.n_misses += 1
+    diff = _full_contact_diff(cache, ref_struct, target_struct, v3_config)
+    return (
+        {k: diff[k] for k in _contact_diff_summary_keys()},
+        cache.contact_pair_changes[key],
+    )
 
 
 def _cached_contact_diff_summary(
@@ -758,6 +851,61 @@ def _get_matched_seed_results(
     return matched
 
 
+def _seed_reproducibility_data(
+    dataset: Any,
+    ref_resolution: Dict[str, Any],
+    v3_config: V3Config,
+    figure_cache: Optional[FigureDataCache] = None,
+) -> List[Dict[str, Any]]:
+    """Build seed-reproducibility rows from the shared matched-seed data.
+
+    Used by F17 and, optionally, by F03's consolidated Panel C. Relies on
+    ``_get_matched_seed_results`` so no structural calculation is repeated;
+    only the seed-level statistical summary is computed here.
+    """
+    ref_condition = ref_resolution.get("reference_condition")
+    matched = _get_matched_seed_results(
+        dataset, ref_resolution, v3_config, figure_cache)
+    rows: List[Dict[str, Any]] = []
+    for condition_id in sorted(matched.keys()):
+        msr_list = matched[condition_id]
+        if not msr_list:
+            continue
+        seed_values: Dict[int, List[float]] = {}
+        seed_coverages: Dict[int, List[float]] = {}
+        for msr in msr_list:
+            vals = [v for v in msr.rmsd_values if v is not None and np.isfinite(v)]
+            if vals:
+                seed_values[msr.seed] = vals
+            if msr.coverage_values:
+                seed_coverages[msr.seed] = list(msr.coverage_values)
+        repro = calculate_seed_reproducibility(
+            seed_values,
+            seed_coverages if seed_coverages else None,
+            metric_id="rmsd_global_ca",
+            condition_id=condition_id,
+            reference_condition=ref_condition,
+        )
+        rows.append({
+            "metric_id": repro.metric_id,
+            "condition_id": repro.condition_id,
+            "reference_condition": repro.reference_condition,
+            "mean": repro.mean,
+            "median": repro.median,
+            "std": repro.std,
+            "iqr": repro.iqr,
+            "n_seeds": repro.n_seeds,
+            "n_valid_seeds": repro.n_valid_seeds,
+            "n_comparisons_total": repro.n_comparisons_total,
+            "n_comparisons_valid": repro.n_comparisons_valid,
+            "direction_consistent": repro.direction_consistent,
+            "direction": repro.direction,
+            "mean_coverage": repro.mean_coverage,
+            "status": repro.status,
+        })
+    return rows
+
+
 def effective_sites(
     dataset: Any,
     ref_resolution: Dict[str, Any],
@@ -887,6 +1035,214 @@ def _detection_title_suffix(
     return None
 
 
+def _generate_f13_views(
+    dataset: Any,
+    matrix: np.ndarray,
+    valid: Optional[np.ndarray],
+    predictions: List[str],
+    conditions: List[str],
+    seeds: List[int],
+    samples: List[int],
+    cluster_labels: Optional[np.ndarray],
+    figures_dir: Path,
+    design: Any = None,
+    view_config: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Generate the F13 view family from the EXISTING pairwise matrix.
+
+    Preserves the full prediction-level matrix as a computational artifact
+    (CSV + metadata sidecar + prediction_metadata.csv), aggregates it to
+    condition level, and renders the enabled views: F13B (within-condition
+    reproducibility, default), F13A (condition similarity) and F13D
+    (prediction-level matrix, both hidden by default). F13C (within vs
+    between) has been removed — its single-number between-condition summary
+    collapsed heterogeneous pairwise distributions. No distance
+    recomputation.
+    """
+    from .figures.f13_similarity_views import (
+        aggregate_condition_matrix,
+        within_condition_values,
+        generate_f13a_condition_similarity,
+        generate_f13b_within_condition_reproducibility,
+        generate_f13d_prediction_matrix,
+        METRIC_LABEL,
+    )
+
+    # View-level toggles: F13A/F13D are hidden by default (prediction-
+    # level matrices are not human-interpretable at scale; F13B is the
+    # default view). figures-dict entries "F13A"/"F13D" re-enable them.
+    view_cfg = dict(view_config or {})
+    hidden = set(V3_F13_HIDDEN_VIEWS)
+    view_enabled = {
+        "F13A": view_cfg.get("F13A", "F13A" not in hidden),
+        "F13B": view_cfg.get("F13B", True),
+        "F13D": view_cfg.get("F13D", "F13D" not in hidden),
+    }
+
+    warnings: List[str] = []
+    n = len(predictions)
+
+    # Remove stale outputs for views that are no longer produced, so the
+    # figures directory always matches the manifest: F13C was removed from
+    # the pipeline entirely, and disabled views must not leave old files.
+    for stale in ("fig_v3_f13c_within_vs_between.png",):
+        try:
+            (figures_dir / stale).unlink(missing_ok=True)
+        except OSError:
+            pass
+    for view_id, png in (("F13A", "fig_v3_f13a_condition_similarity.png"),
+                         ("F13D", "fig_v3_f13d_prediction_matrix.png")):
+        if not view_enabled.get(view_id, False):
+            try:
+                (figures_dir / png).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    # --- Step 2: preserve the full matrix + metadata (unchanged values) --
+    pred_meta = pd.DataFrame({
+        "prediction_id": predictions,
+        "condition_id": conditions,
+        "seed": seeds,
+        "sample_id": samples,
+    })
+    if cluster_labels is not None and len(cluster_labels) == n:
+        pred_meta["cluster_id"] = [int(c) + 1 for c in cluster_labels]
+    try:
+        pred_meta_path = figures_dir.parent / "tables" / "prediction_metadata.csv"
+        pred_meta_path.parent.mkdir(parents=True, exist_ok=True)
+        pred_meta.to_csv(pred_meta_path, index=False)
+    except Exception as e:
+        logger.warning("[V3] F13 prediction_metadata write failed: %s", e)
+
+    # Stable preservation of the FULL prediction-level matrix (values are
+    # exactly the cached pairwise distances; invalid pairs stay blank).
+    # The cache CSV under v3/cache/ is content-hashed and may be cleared;
+    # this copy is the durable analysis artifact.
+    try:
+        matrix_path = figures_dir.parent / "tables" / "pairwise_structural_distances.csv"
+        matrix_df = pd.DataFrame(
+            np.where(valid, matrix, np.nan),
+            index=predictions, columns=predictions)
+        matrix_df.to_csv(matrix_path)
+    except Exception as e:
+        logger.warning("[V3] F13 pairwise_structural_distances write failed: %s", e)
+
+    # --- Condition labels from existing design metadata -----------------
+    def _labels() -> Dict[str, str]:
+        if design is not None and hasattr(design, "get_condition_label"):
+            return {
+                c: (design.get_condition_label(c)
+                    if c in getattr(design, "conditions", []) else c)
+                for c in set(conditions)
+            }
+        return {}
+
+    # --- Step 3-4: condition-level aggregation --------------------------
+    summary_long, summary_matrix, _within_stats = aggregate_condition_matrix(
+        matrix, valid, conditions, summary="median")
+
+    # --- Figures ---------------------------------------------------------
+    results: Dict[str, Any] = {"status": "pass", "n_observations": n}
+    views: Dict[str, Any] = {}
+    label_map = _labels()
+
+    w_vals = within_condition_values(matrix, valid, conditions)
+    views: Dict[str, Any] = {}
+
+    if view_enabled["F13B"]:
+        r_b = generate_f13b_within_condition_reproducibility(
+            w_vals, figures_dir, condition_labels=label_map)
+        views["F13B"] = r_b
+
+    if view_enabled["F13A"]:
+        r_a = generate_f13a_condition_similarity(
+            summary_long, summary_matrix, sorted(set(conditions)),
+            figures_dir, condition_labels=label_map)
+        views["F13A"] = r_a
+
+    if view_enabled["F13D"]:
+        # Generic annotation strips from available metadata: condition
+        # always; seed and predicted structural cluster when present.
+        strips: Dict[str, List[Any]] = {}
+        if cluster_labels is not None and len(cluster_labels) == n:
+            strips["Predicted structural cluster"] = [
+                int(c) + 1 for c in cluster_labels]
+        strips["Seed"] = list(seeds)
+
+        r_d = generate_f13d_prediction_matrix(
+            matrix, valid, predictions, conditions, seeds, samples,
+            figures_dir,
+            cluster_labels=cluster_labels,
+            annotation_strips=strips,
+        )
+        views["F13D"] = r_d
+
+    if not views:
+        # All views hidden: still return the preserved artifacts and
+        # aggregation tables so the analysis outputs survive, but mark the
+        # figure itself as skipped so the manifest reflects the config.
+        fig_result = {
+            "status": "skip",
+            "reason": ("All F13 views hidden (F13A/F13D are default-off; "
+                       "re-enable via figures config)"),
+            "output_path": None,
+            "n_observations": 0,
+            "warnings": ["F13: only F13B is on by default"],
+            "views": {},
+            "matrix_type": "prediction x prediction (preserved) + condition x condition (aggregate)",
+            "metric": METRIC_LABEL,
+            "ordering": None,
+            "clustering_method": None,
+        }
+        fig_result["condition_similarity_summary"] = summary_long
+        fig_result["within_condition_variability"] = pd.DataFrame([
+            {"condition_id": c,
+             "n_predictions": s["n_predictions"],
+             "n_pairs": s["n_pairs"],
+             "median_rmsd": s["median"],
+             "mean_rmsd": s["mean"],
+             "sd_rmsd": s["sd"],
+             "iqr_rmsd": s["iqr"]}
+            for c, s in _within_stats.items()
+        ])
+        return fig_result
+
+    # --- Step 15 tables ---------------------------------------------------
+    ordered_views = [k for k in ("F13A", "F13B", "F13D") if k in views]
+    fig_result: Dict[str, Any] = {
+        "status": "pass",
+        "output_path": views[ordered_views[0]].get("output_path"),
+        "n_observations": n,
+        "warnings": warnings,
+        "views": {k: {
+            "status": v.get("status"),
+            "output_path": v.get("output_path"),
+            "n_observations": v.get("n_observations"),
+            "warnings": v.get("warnings", []),
+        } for k, v in views.items()},
+        "matrix_type": "prediction x prediction (preserved) + condition x condition (aggregate)",
+        "metric": METRIC_LABEL,
+        "ordering": views.get("F13D", {}).get("ordering"),
+        "clustering_method": views.get("F13D", {}).get("clustering_method"),
+    }
+    for v in views.values():
+        fig_result["warnings"].extend(v.get("warnings", []))
+
+    # Tables written by _generate_v3_tables via these results
+    fig_result["condition_similarity_summary"] = summary_long
+    fig_result["within_condition_variability"] = pd.DataFrame([
+        {"condition_id": c,
+         "n_predictions": s["n_predictions"],
+         "n_pairs": s["n_pairs"],
+         "median_rmsd": s["median"],
+         "mean_rmsd": s["mean"],
+         "sd_rmsd": s["sd"],
+         "iqr_rmsd": s["iqr"]}
+        for c, s in _within_stats.items()
+    ])
+    return fig_result
+
+
 def _generate_figure_with_data(
     generator: Any,
     fig_id: str,
@@ -978,7 +1334,22 @@ def _generate_figure_with_data(
                     "rmsd_std": msr.rmsd_std,
                     "coverage_mean": msr.coverage_mean,
                 })
-        return generator(seed_rmsd_results=seed_results, **common_params)
+
+        # Optional seed-level reproducibility data for a consolidated view.
+        # Reuses the same matched-seed data as F17 via the shared cache, so
+        # no structural calculation is repeated.
+        seed_reproducibility: Optional[List[Dict[str, Any]]] = None
+        try:
+            seed_reproducibility = _seed_reproducibility_data(
+                dataset, ref_resolution, v3_config, figure_cache)
+        except Exception as e:
+            logger.warning("[V3] F03 seed-reproducibility prep failed: %s", e)
+
+        return generator(
+            seed_rmsd_results=seed_results,
+            seed_reproducibility=seed_reproducibility,
+            **common_params,
+        )
 
     # ------------------------------------------------------------------
     if fig_id == "F04":
@@ -1063,7 +1434,14 @@ def _generate_figure_with_data(
     # ------------------------------------------------------------------
     if fig_id == "F07":
         # Contact change summary (seed-level aggregation of per-seed diffs)
+        # consolidated with F06's per-pair detail (docs/V3_STRUCTURAL_
+        # VISUALIZATION_REVIEW.md: F06 merged into F07). When F06 itself is
+        # part of the same run, its full-diff computation populated the
+        # shared pair-change cache, so nothing is recomputed here.
         contact_change_data = []
+        pair_gained_counter: Dict[Any, int] = defaultdict(int)
+        pair_lost_counter: Dict[Any, int] = defaultdict(int)
+        pair_condition_counter: Dict[Any, set] = defaultdict(set)
         if ref_condition and dataset.predictions:
             for condition_id in sorted(dataset.predictions.keys()):
                 if condition_id == ref_condition:
@@ -1078,11 +1456,17 @@ def _generate_figure_with_data(
                         if ref_struct is None:
                             continue
                         try:
-                            diff = _cached_contact_diff_summary(
+                            summary, pairs = _cached_contact_diff_with_pairs(
                                 figure_cache, ref_struct, target_struct,
                                 v3_config)
-                            diff["condition"] = condition_id
-                            seed_diffs.append(diff)
+                            summary["condition"] = condition_id
+                            seed_diffs.append(summary)
+                            for pair, delta in pairs.items():
+                                if delta > 0:
+                                    pair_gained_counter[pair] += 1
+                                elif delta < 0:
+                                    pair_lost_counter[pair] += 1
+                                pair_condition_counter[pair].add(condition_id)
                         except Exception as e:
                             logger.warning("[V3] F07 contact diff failed (%s seed %s): %s",
                                            condition_id, seed, e)
@@ -1098,7 +1482,35 @@ def _generate_figure_with_data(
                         "n_total": float(np.mean([d["n_total"] for d in seed_diffs])),
                         "n_comparisons": len(seed_diffs),
                     })
-        return generator(contact_change_data=contact_change_data, **common_params)
+
+        all_changed_pairs = set(pair_gained_counter) | set(pair_lost_counter)
+        recurring_pairs = [
+            {
+                "chain_a": pair[0],
+                "seq_a": pair[1],
+                "chain_b": pair[2],
+                "seq_b": pair[3],
+                "n_gained": pair_gained_counter.get(pair, 0),
+                "n_lost": pair_lost_counter.get(pair, 0),
+                "n_conditions": len(pair_condition_counter.get(pair, ())),
+            }
+            for pair in sorted(
+                all_changed_pairs,
+                key=lambda p: -(
+                    pair_gained_counter.get(p, 0) + pair_lost_counter.get(p, 0)
+                ),
+            )
+        ]
+        fig_result = generator(
+            contact_change_data=contact_change_data,
+            recurring_pairs=recurring_pairs,
+            **common_params,
+        )
+        # Preserve the full changed-pair aggregation for the
+        # contact_pair_changes table (the figure draws only a ranked
+        # display subset of these existing values).
+        fig_result["recurring_pairs"] = recurring_pairs
+        return fig_result
 
     # ------------------------------------------------------------------
     if fig_id == "F08":
@@ -1210,6 +1622,15 @@ def _generate_figure_with_data(
                             "seed": seed,
                             "sample": sample,
                             "region_label": site_label,
+                            "site_chain": site.get("chain"),
+                            "site_residue": site.get("residue"),
+                            "site_radius": site.get("radius"),
+                            "site_detected": (
+                                "mean_displacement" in site
+                                or "z" in site
+                                or "seq_list" in site
+                                or "n_residues" in site
+                            ),
                             "local_rmsd_target": target_region.local_rmsd,
                             "local_rmsd_ref": ref_region.local_rmsd,
                             "local_rmsd": target_region.local_rmsd,
@@ -1333,27 +1754,44 @@ def _generate_figure_with_data(
         conditions = list(pairwise_matrix.conditions)
         seeds = list(pairwise_matrix.seeds)
 
-        if fig_id == "F12":
+        if fig_id in ("F12", "F13"):
+            # Compute the clustering once for both figures: F12 displays
+            # the assignments, F13 reuses them as display ordering. No
+            # recomputation and no change to the clustering parameters.
             clustering = hierarchical_clustering(
                 matrix_filled,
                 n_clusters=v3_config.clustering.n_clusters,
                 linkage=v3_config.clustering.linkage,
             )
-            return generator(
-                distance_matrix=matrix_filled,
+            cluster_labels = clustering.get("labels")
+
+            if fig_id == "F12":
+                return generator(
+                    distance_matrix=matrix_filled,
+                    conditions=conditions,
+                    seeds=seeds,
+                    predictions=predictions,
+                    cluster_labels=cluster_labels,
+                    **common_params,
+                )
+
+            # F13: family of condition/prediction similarity views. The
+            # full prediction-level matrix is preserved first (CSV +
+            # metadata sidecar), then aggregated for the human-readable
+            # views. No distance recomputation. F13A/F13D are hidden by
+            # default; figures-dict entries "F13A"/"F13D" re-enable them.
+            return _generate_f13_views(
+                dataset=dataset,
+                matrix=matrix,
+                valid=pairwise_matrix.valid,
+                predictions=predictions,
                 conditions=conditions,
                 seeds=seeds,
-                predictions=predictions,
-                cluster_labels=clustering.get("labels"),
-                **common_params,
-            )
-
-        if fig_id == "F13":
-            return generator(
-                distance_matrix=matrix_filled,
-                predictions=predictions,
-                conditions=conditions,
-                **common_params,
+                samples=list(pairwise_matrix.samples),
+                cluster_labels=cluster_labels,
+                figures_dir=figures_dir,
+                design=common_params.get("design"),
+                view_config=v3_config.figures,
             )
 
         # F14
@@ -1484,46 +1922,10 @@ def _generate_figure_with_data(
 
     # ------------------------------------------------------------------
     if fig_id == "F17":
-        # Seed reproducibility (seed-level unit of analysis)
-        seed_repro_data = []
-        matched = _get_matched_seed_results(
+        # Seed reproducibility (seed-level unit of analysis). Uses the
+        # shared helper so F03 Panel C and F17 report identical numbers.
+        seed_repro_data = _seed_reproducibility_data(
             dataset, ref_resolution, v3_config, figure_cache)
-        for condition_id in sorted(matched.keys()):
-            msr_list = matched[condition_id]
-            if not msr_list:
-                continue
-            seed_values: Dict[int, List[float]] = {}
-            seed_coverages: Dict[int, List[float]] = {}
-            for msr in msr_list:
-                vals = [v for v in msr.rmsd_values if v is not None and np.isfinite(v)]
-                if vals:
-                    seed_values[msr.seed] = vals
-                if msr.coverage_values:
-                    seed_coverages[msr.seed] = list(msr.coverage_values)
-            repro = calculate_seed_reproducibility(
-                seed_values,
-                seed_coverages if seed_coverages else None,
-                metric_id="rmsd_global_ca",
-                condition_id=condition_id,
-                reference_condition=ref_condition,
-            )
-            seed_repro_data.append({
-                "metric_id": repro.metric_id,
-                "condition_id": repro.condition_id,
-                "reference_condition": repro.reference_condition,
-                "mean": repro.mean,
-                "median": repro.median,
-                "std": repro.std,
-                "iqr": repro.iqr,
-                "n_seeds": repro.n_seeds,
-                "n_valid_seeds": repro.n_valid_seeds,
-                "n_comparisons_total": repro.n_comparisons_total,
-                "n_comparisons_valid": repro.n_comparisons_valid,
-                "direction_consistent": repro.direction_consistent,
-                "direction": repro.direction,
-                "mean_coverage": repro.mean_coverage,
-                "status": repro.status,
-            })
         return generator(seed_repro_data=seed_repro_data, **common_params)
 
     # ------------------------------------------------------------------
@@ -1808,6 +2210,34 @@ def _generate_v3_tables(
         pd.DataFrame(rows).to_csv(path, index=False)
         written["contact_changes"] = str(path)
 
+    # --- condition_similarity_summary.csv + within_condition_variability.csv
+    # (from the F13 view family; aggregated from the preserved prediction-
+    # level matrix — see figures/f13_similarity_views.py) ---
+    f13_result = results.get("figures", {}).get("F13", {})
+    if isinstance(f13_result, dict):
+        cond_summary = f13_result.get("condition_similarity_summary")
+        if cond_summary is not None and len(cond_summary):
+            path = tables_dir / "condition_similarity_summary.csv"
+            cond_summary.to_csv(path, index=False)
+            written["condition_similarity_summary"] = str(path)
+        within_tbl = f13_result.get("within_condition_variability")
+        if within_tbl is not None and len(within_tbl):
+            path = tables_dir / "within_condition_variability.csv"
+            within_tbl.to_csv(path, index=False)
+            written["within_condition_variability"] = str(path)
+
+    # --- contact_pair_changes.csv (changed residue pairs aggregated across
+    # comparisons; the full data behind F07 Panel C's ranked display) ---
+    f07_result = results.get("figures", {}).get("F07", {})
+    pair_rows = (
+        f07_result.get("recurring_pairs")
+        if isinstance(f07_result, dict) else None
+    )
+    if pair_rows:
+        path = tables_dir / "contact_pair_changes.csv"
+        pd.DataFrame(pair_rows).to_csv(path, index=False)
+        written["contact_pair_changes"] = str(path)
+
     # --- interface_contacts.csv (prediction level, matched_sample) ---
     rows = []
     if ref_condition and dataset.predictions:
@@ -1982,6 +2412,7 @@ def _write_v3_manifest(
         "errors": results.get("errors", []),
         "skipped": results.get("skipped", []),
         "figure_cache": results.get("figure_cache", {}),
+        "suite_notes": results.get("suite_notes", {}),
     }
 
     for fig_id, fig_result in results.get("figures", {}).items():
@@ -1996,6 +2427,16 @@ def _write_v3_manifest(
             "error": (fig_result.get("error")
                       if fig_result.get("status") == "failed" else None),
         }
+        # F13 view family: record per-view provenance (matrix type, metric,
+        # aggregation, ordering) for the manifest.
+        if fig_id == "F13" and isinstance(fig_result, dict):
+            for key in ("matrix_type", "metric", "ordering",
+                        "clustering_method"):
+                if fig_result.get(key) is not None:
+                    entry[key] = fig_result[key]
+            views = fig_result.get("views")
+            if isinstance(views, dict):
+                entry["views"] = views
         manifest["figures"].append(entry)
 
     manifest_path = metadata_dir / "figure_manifest.json"
@@ -2053,6 +2494,26 @@ def _generate_v3_report(
         f.write(f"- Success: {summary.get('n_figures_success', 0)}\n")
         f.write(f"- Skipped: {summary.get('n_figures_skipped', 0)}\n")
         f.write(f"- Failed: {summary.get('n_figures_failed', 0)}\n\n")
+
+        suite_notes = results.get("suite_notes", {})
+        if suite_notes:
+            f.write("## Suite Notes\n\n")
+            consolidated = suite_notes.get("consolidated", [])
+            if consolidated:
+                entries = consolidated if isinstance(consolidated, list) else [consolidated]
+                for entry in entries:
+                    f.write(
+                        f"- Consolidated {', '.join(entry.get('from', []))} "
+                        f"into {entry.get('into', '?')}: "
+                        f"{entry.get('detail', '')}\n"
+                    )
+            demoted = suite_notes.get("demoted_from_default", [])
+            if demoted:
+                f.write(
+                    "- Not in the default suite (available via explicit "
+                    f"opt-in): {', '.join(demoted)}\n"
+                )
+            f.write("\n")
 
         f.write("## Figures\n\n")
         f.write("| Figure ID | Status | Observations | Output |\n")

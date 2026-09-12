@@ -60,7 +60,8 @@ def create_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="Comma-separated figure IDs to generate (e.g. F01,F02,F12). "
-             "Default: all figures enabled",
+             "Default: all figures except F01, F06, F08, F09, F11, F12 (which "
+             "are available by listing them explicitly here)",
     )
 
     parser.add_argument(

@@ -225,10 +225,9 @@ def create_v3_config_interactive(
     output_format: str = "png",
 ) -> V3Config:
     """Create a V3 configuration with sensible defaults."""
-    figures = {}
-    # Enable all 20 figures by default
-    for i in range(1, 21):
-        figures[f"F{i:02d}"] = True
+    # Leave the figures dict empty so get_enabled_figures applies the
+    # default suite (all figures except V3_DEFAULT_OFF_FIGURES).
+    figures: Dict[str, bool] = {}
 
     reference = {}
     if reference_condition:
@@ -246,15 +245,47 @@ def create_v3_config_interactive(
 # Default figure list (all 20 figures)
 V3_ALL_FIGURES = [f"F{i:02d}" for i in range(1, 21)]
 
+# Figures excluded from the default suite. They remain fully available via
+# explicit opt-in (config figures dict or the CLI --figures list). Rationale
+# (docs/V3_STRUCTURAL_VISUALIZATION_REVIEW.md):
+#   F01 — QC is reported by validation/tables; the figure adds no information
+#         when all structures parse.
+#   F06 — per-pair contact detail is consolidated into F07 (which renders
+#         the recurring-pair panel itself when F06 is not part of the run).
+#   F08 / F09 — interface figures are data-dependent and often reflect
+#         sparse baselines rather than comparable changes.
+#   F11 — domain motion is only meaningful with meaningful region
+#         definitions; it skips without them.
+#   F12 — the cluster-assignment presentation is hard to read/interpret
+#         (dense distance matrix + sparse categorical strip); the cluster
+#         information remains available via F13B's ordering and the
+#         structural_clusters.csv table. Opt in via figures config.
+V3_DEFAULT_OFF_FIGURES = ("F01", "F06", "F08", "F09", "F11", "F12")
+
+# F13 renders as separate views (condition similarity / within-condition
+# reproducibility / prediction-level matrix). The prediction-level matrix
+# views are hidden from the default output: at hundreds of predictions the
+# matrices are not human-interpretable. F13B (within-condition
+# reproducibility) remains the default F13 view. Hidden views can be
+# re-enabled with figures entries {"F13A": True, "F13D": True}.
+V3_F13_HIDDEN_VIEWS = ("F13A", "F13D")
+
 
 def get_enabled_figures(config: V3Config) -> List[str]:
-    """Return list of enabled figure IDs from configuration."""
+    """Return list of enabled figure IDs from configuration.
+
+    With no explicit figure toggles, the default suite is all figures
+    except ``V3_DEFAULT_OFF_FIGURES``. With a partial figures dict, entries
+    are overrides: an explicit True enables even a default-off figure, and
+    an explicit False disables even a default-on one.
+    """
     if not config.figures:
-        return V3_ALL_FIGURES
+        return [f for f in V3_ALL_FIGURES if f not in V3_DEFAULT_OFF_FIGURES]
 
     enabled = []
     for fig_id in V3_ALL_FIGURES:
-        if config.figures.get(fig_id, True):
+        default_on = fig_id not in V3_DEFAULT_OFF_FIGURES
+        if config.figures.get(fig_id, default_on):
             enabled.append(fig_id)
     return enabled
 
@@ -268,6 +299,8 @@ __all__ = [
     "create_v3_config_interactive",
     "get_enabled_figures",
     "V3_ALL_FIGURES",
+    "V3_DEFAULT_OFF_FIGURES",
+    "V3_F13_HIDDEN_VIEWS",
     "DPI",
     "OUTPUT_FORMAT",
     "SINGLE_COL_WIDTH",

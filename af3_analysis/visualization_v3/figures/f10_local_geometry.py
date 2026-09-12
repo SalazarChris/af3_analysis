@@ -85,57 +85,116 @@ def generate_f10_local_geometry(
     # Build labels for regions
     region_labels = sorted(df["region_label"].unique())
 
+    # Condition labels and ordering (design-driven where available; no
+    # hardcoded condition identities).
+    if design and hasattr(design, "get_condition_label"):
+        df["condition_label"] = df["condition_id"].apply(
+            lambda c: design.get_condition_label(c) if c in design.conditions else c
+        )
+    else:
+        df["condition_label"] = df["condition_id"]
+
+    if design and hasattr(design, "condition_names"):
+        order = [c for c in design.condition_names if c in df["condition_id"].unique()]
+        order += [c for c in df["condition_id"].unique() if c not in order]
+    else:
+        order = sorted(df["condition_id"].unique())
+
+    label_map = {c: (design.get_condition_label(c) if design and hasattr(design, "get_condition_label") else c)
+                 for c in order}
+    categories = [label_map.get(c, c) for c in order]
+    df["plot_label"] = pd.Categorical(df["condition_label"], categories=categories, ordered=True)
+
+    palette = sns.color_palette("Set2", n_colors=max(len(order), 3))
+    color_map = {label_map.get(c, c): palette[i] for i, c in enumerate(order)}
+
     n_obs = len(df)
 
     # --- Plot ---
     fig, axes = plt.subplots(1, 2, figsize=(SINGLE_COL_WIDTH, 5.0))
 
-    # Panel A: Local RMSD by region
+    # Panel A: Local RMSD by region, grouped per condition so the figure
+    # shows which condition drives each region's local difference.
     ax = axes[0]
 
-    region_data = df.groupby("region_label")["local_rmsd"].agg(["mean", "std", "count"]).reset_index()
-    region_data = region_data.sort_values("region_label")
-
-    x_pos = np.arange(len(region_data))
-    ax.bar(
-        x_pos,
-        region_data["mean"],
-        0.6,
-        yerr=region_data["std"],
-        color="#2C7BB6",
-        edgecolor="white",
-        linewidth=0.8,
-        capsize=3,
+    region_order = sorted(df["region_label"].unique())
+    region_data = (
+        df.groupby(["region_label", "plot_label"], observed=True)["local_rmsd"]
+        .agg(["mean", "std", "count"])
+        .reset_index()
     )
 
+    x_pos = np.arange(len(region_order))
+    n_cond = max(len(order), 1)
+    bar_width = 0.8 / n_cond
+    labeled_conditions = set()
+    for j, cond in enumerate(order):
+        cond_label = label_map.get(cond, cond)
+        sub = (
+            region_data[region_data["plot_label"] == cond_label]
+            .set_index("region_label")
+        )
+        offset = (j - (n_cond - 1) / 2) * bar_width
+        for k, region in enumerate(region_order):
+            if region not in sub.index:
+                continue
+            row = sub.loc[region]
+            mean_val = row["mean"]
+            if pd.isna(mean_val):
+                continue
+            yerr = row["std"] if pd.notna(row["std"]) else None
+            ax.bar(
+                k + offset, mean_val, bar_width * 0.9,
+                yerr=yerr,
+                color=color_map[cond_label],
+                edgecolor="white",
+                linewidth=0.8,
+                capsize=2,
+                label=cond_label if cond_label not in labeled_conditions else None,
+            )
+            labeled_conditions.add(cond_label)
+
     ax.set_xticks(x_pos)
-    ax.set_xticklabels(region_data["region_label"], rotation=30, ha="right", fontsize=9)
+    ax.set_xticklabels(region_order, rotation=30, ha="right", fontsize=9)
     ax.set_ylabel("Local RMSD (Å)")
     ax.set_title("  A. Local RMSD by Region", loc="left", fontsize=11, fontweight="bold")
     ax.tick_params(axis="y", labelsize=9)
 
+    if len(labeled_conditions) > 1:
+        ax.legend(fontsize=7, loc="best")
+
     sns.despine(ax=ax, left=True)
     ax.yaxis.grid(True, alpha=0.3)
 
-    # Panel B: Local confidence vs RMSD (scatter)
+    # Panel B: Local confidence vs RMSD (scatter), colored by condition so
+    # the continuous confidence-geometry relationship stays visible.
     ax = axes[1]
 
     if "local_plddt_mean" in df.columns:
         df_plot = df[df["local_plddt_mean"].notna()].copy()
         if not df_plot.empty:
-            scatter = ax.scatter(
-                df_plot["local_plddt_mean"],
-                df_plot["local_rmsd"],
-                c=df_plot["local_rmsd"],
-                cmap="RdYlBu_r",
-                s=30,
-                alpha=0.6,
-                edgecolors="white",
-                linewidth=0.3,
-            )
-            plt.colorbar(scatter, ax=ax, label="Local RMSD (Å)")
+            for cond in order:
+                cond_label = label_map.get(cond, cond)
+                sub = df_plot[df_plot["condition_id"] == cond]
+                if sub.empty:
+                    continue
+                ax.scatter(
+                    sub["local_plddt_mean"],
+                    sub["local_rmsd"],
+                    color=color_map[cond_label],
+                    s=30,
+                    alpha=0.6,
+                    edgecolors="white",
+                    linewidth=0.3,
+                    label=cond_label,
+                )
             ax.set_xlabel("Local mean pLDDT")
             ax.set_ylabel("Local RMSD (Å)")
+            handles, labels = ax.get_legend_handles_labels()
+            if len(handles) > 12:
+                ax.legend(loc="center left", bbox_to_anchor=(1.0, 0.5), fontsize=7)
+            elif len(handles) > 1:
+                ax.legend(fontsize=7, loc="best")
         else:
             ax.text(0.5, 0.5, "No confidence data", ha="center", va="center")
             ax.set_xlabel("Local mean pLDDT")
@@ -151,8 +210,22 @@ def generate_f10_local_geometry(
     sns.despine(ax=ax, left=True)
     ax.grid(True, alpha=0.3)
 
-    # Main title
-    main_title = title or "Local/PTM-Site Geometry"
+    # Main title. When the runner passes no title, make the provenance of
+    # data-detected sites explicit here; runner-provided titles already
+    # carry this annotation.
+    detected_in_data = (
+        "site_detected" in df.columns
+        and bool(df["site_detected"].fillna(False).any())
+    )
+    if title is not None:
+        main_title = title
+    elif detected_in_data:
+        main_title = (
+            "Local/PTM-Site Geometry — predicted structural sites "
+            "(detected from data; not functional annotations)"
+        )
+    else:
+        main_title = "Local/PTM-Site Geometry"
     fig.suptitle(main_title, fontsize=14, fontweight="bold", y=1.02)
 
     fig.tight_layout(rect=[0, 0, 1, 0.95])
@@ -164,8 +237,8 @@ def generate_f10_local_geometry(
     warnings = []
     if n_obs == 0:
         warnings.append("Zero local geometry observations")
-    if len(region_data) > 10:
-        warnings.append(f"Large number of regions ({len(region_data)}), figure may be dense")
+    if len(region_order) > 10:
+        warnings.append(f"Large number of regions ({len(region_order)}), figure may be dense")
 
     return {
         "status": "pass",

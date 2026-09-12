@@ -98,11 +98,16 @@ def generate_f20_structure_confidence_matrix(
     n_obs = len(df)
 
     # --- Plot ---
+    # Size the canvas from the actual grid so every panel is large enough
+    # for readable text at thesis/PDF size (presentation only; panel
+    # content and variables unchanged).
     n_struct = len(structural_metrics)
     n_conf = len(confidence_metrics)
-    fig_height = min(10.0, max(4.0, max(n_struct, n_conf) * 0.5))
+    panel_in = 3.6
+    fig_width = min(16.0, max(9.0, n_conf * panel_in))
+    fig_height = min(16.0, max(5.0, n_struct * panel_in))
 
-    fig, axes = plt.subplots(n_struct, n_conf, figsize=(SINGLE_COL_WIDTH * 1.5, fig_height))
+    fig, axes = plt.subplots(n_struct, n_conf, figsize=(fig_width, fig_height))
 
     # Handle single row/column cases
     if n_struct == 1 and n_conf == 1:
@@ -119,56 +124,58 @@ def generate_f20_structure_confidence_matrix(
             x_vals = df[conf_metric]
             y_vals = df[struct_metric]
 
-            # Scatter
+            # Scatter: smaller semi-transparent markers reduce overplotting
+            # without hiding or transforming any observation.
             ax.scatter(
                 x_vals,
                 y_vals,
-                s=20,
-                alpha=0.5,
+                s=14,
+                alpha=0.4,
                 color="#2C7BB6",
-                edgecolors="white",
-                linewidth=0.3,
+                edgecolors="none",
+                rasterized=True,
             )
 
-            # Correlation
+            # Correlation (existing statistics; no new tests or thresholds)
             if len(x_vals) > 2 and np.ptp(np.asarray(x_vals)) > 0:
                 corr, p_val = stats.pearsonr(x_vals, y_vals)
                 ax.text(
-                    0.05, 0.95,
+                    0.03, 0.97,
                     f"r = {corr:.2f}\np = {p_val:.3f}",
                     transform=ax.transAxes,
-                    fontsize=8,
+                    fontsize=10,
                     verticalalignment="top",
-                    bbox=dict(boxstyle="round", facecolor="white", alpha=0.8),
+                    bbox=dict(boxstyle="round", facecolor="white", alpha=0.85),
                 )
 
-                # Add regression line
+                # Least-squares regression line (pre-existing element; the
+                # red dashed line is the fit, not a threshold or reference).
                 slope, intercept, r_value, p_value, std_err = stats.linregress(x_vals, y_vals)
                 x_line = np.linspace(x_vals.min(), x_vals.max(), 100)
                 y_line = slope * x_line + intercept
-                ax.plot(x_line, y_line, color="red", linewidth=1, linestyle="--", alpha=0.5)
+                ax.plot(x_line, y_line, color="red", linewidth=1.2, linestyle="--", alpha=0.6)
             elif len(x_vals) > 2:
                 # Zero-variance metric (e.g. constant pLDDT): correlation
                 # and regression are undefined. Annotate instead of crashing.
                 ax.text(
-                    0.05, 0.95,
+                    0.03, 0.97,
                     "r = n/a\n(constant x)",
                     transform=ax.transAxes,
-                    fontsize=8,
+                    fontsize=10,
                     verticalalignment="top",
-                    bbox=dict(boxstyle="round", facecolor="white", alpha=0.8),
+                    bbox=dict(boxstyle="round", facecolor="white", alpha=0.85),
                 )
 
-            ax.set_xlabel(conf_metric, fontsize=8)
-            ax.set_ylabel(struct_metric, fontsize=8)
-            ax.tick_params(axis="both", labelsize=8)
+            ax.set_xlabel(conf_metric, fontsize=11)
+            ax.set_ylabel(struct_metric, fontsize=11)
+            ax.tick_params(axis="both", labelsize=9)
 
             sns.despine(ax=ax, left=True)
             ax.grid(True, alpha=0.3)
 
     # Main title
     main_title = title or "Structure-Confidence Relationship Matrix"
-    fig.suptitle(main_title, fontsize=14, fontweight="bold", y=1.02)
+    fig.suptitle(main_title, fontsize=15, fontweight="bold", y=1.02)
 
     fig.tight_layout(rect=[0, 0, 1, 0.95])
 

@@ -99,103 +99,125 @@ def generate_f12_structural_clustering(
 
     n_clusters = len(np.unique(cluster_labels))
 
-    # Build DataFrame for plotting
-    df = pd.DataFrame({
-        "prediction_id": predictions,
-        "condition": conditions,
-        "seed": seeds,
-        "cluster": cluster_labels,
-    })
-
-    # Get condition labels
-    if design and hasattr(design, "get_condition_label"):
-        df["condition_label"] = df["condition"].apply(
-            lambda c: design.get_condition_label(c) if c in design.conditions else c
-        )
-    else:
-        df["condition_label"] = df["condition"]
-
-    # Sort conditions
-    if design and hasattr(design, "condition_names"):
-        order = [c for c in design.condition_names if c in df["condition"].unique()]
-        order += [c for c in df["condition"].unique() if c not in order]
-    else:
-        order = sorted(df["condition"].unique())
-
-    label_map = {c: (design.get_condition_label(c) if design and hasattr(design, "get_condition_label") else c)
-                 for c in order}
-    df["condition_label"] = df["condition_label"].astype(
-        pd.CategoricalDtype(categories=[label_map.get(c, c) for c in order], ordered=True)
-    )
-
     n_obs = n
+
+    # Reorder predictions by predicted structural cluster (then condition
+    # and seed) so block structure in the distance matrix is visible.
+    # This is a presentation ordering only; it does not alter the
+    # clustering or the underlying distances.
+    ordered_cluster_labels = np.asarray(cluster_labels).astype(int)
+    row_order = sorted(
+        range(n),
+        key=lambda i: (
+            int(ordered_cluster_labels[i]), str(conditions[i]), int(seeds[i]),
+            str(predictions[i]),
+        ),
+    )
+    ordered_matrix = distance_matrix[np.ix_(row_order, row_order)]
+    ordered_predictions = [predictions[i] for i in row_order]
+    ordered_conditions = [conditions[i] for i in row_order]
+    ordered_cluster_labels = ordered_cluster_labels[row_order]
 
     # --- Plot ---
     fig_height = min(8.0, max(4.0, n * 0.15))
     fig, axes = plt.subplots(1, 2, figsize=(DOUBLE_COL_WIDTH, fig_height))
 
-    palette = sns.color_palette("Set2", n_colors=max(n_clusters, 2))
+    # One consistent color per predicted structural cluster, used in both
+    # panels so assignments can be read across the figure.
+    cluster_ids = sorted(np.unique(ordered_cluster_labels).tolist())
+    cluster_palette_list = sns.color_palette("Set2", n_colors=max(len(cluster_ids), 2))
+    cluster_palette = {
+        f"Cluster {cid + 1}": cluster_palette_list[i]
+        for i, cid in enumerate(cluster_ids)
+    }
 
-    # Panel A: Clustering dendrogram (heatmap with cluster boundaries)
+    # Panel A: distance matrix ordered by predicted structural cluster.
+    # Perceptually uniform colormap for the continuous distances (display
+    # choice only; matrix values, vmin=0, and no clipping are unchanged).
     ax = axes[0]
 
-    # Create annotation matrix
-    annot_matrix = pd.DataFrame(
-        cluster_labels.reshape(-1, 1),
-        index=predictions,
-        columns=["cluster"],
-    )
-
-    # Draw clustered heatmap
     sns.heatmap(
-        distance_matrix,
+        ordered_matrix,
         annot=False,
-        cmap="YlOrRd",
+        cmap="viridis",
+        vmin=0,
         ax=ax,
-        cbar_kws={"label": "RMSD (Å)"},
-        xticklabels=[],
-        yticklabels=[],
+        cbar_kws={"label": "RMSD (Å)", "fraction": 0.04, "pad": 0.02},
+        xticklabels=False,
+        yticklabels=False,
     )
 
-    ax.set_xlabel("Prediction index")
-    ax.set_ylabel("Prediction index")
+    # Draw white boundaries between consecutive cluster blocks.
+    for i in range(1, n):
+        if ordered_cluster_labels[i] != ordered_cluster_labels[i - 1]:
+            ax.axhline(i, color="white", linewidth=1.2)
+            ax.axvline(i, color="white", linewidth=1.2)
+
+    ax.set_xlabel("Prediction index (ordered by predicted cluster)")
+    ax.set_ylabel("Prediction index (ordered by predicted cluster)")
     ax.set_title("  A. Structural Distance Matrix", loc="left", fontsize=11, fontweight="bold")
     ax.tick_params(axis="both", labelsize=8)
 
-    # Panel B: Clustering assignment
+    # Panel B: cluster assignment as a compact ordered strip. The y-axis
+    # already identifies each predicted structural cluster, so points are
+    # NOT colored by cluster (no redundant 20-color legend); condition
+    # identity is used for coloring instead, consistent with the other
+    # figures' condition palette.
     ax = axes[1]
 
-    # Create a dataframe for visualization
-    viz_df = df.copy()
-    viz_df["index"] = range(len(viz_df))
+    viz_df = pd.DataFrame({
+        "prediction_id": ordered_predictions,
+        "condition": ordered_conditions,
+        "cluster": ordered_cluster_labels,
+        "index": range(n),
+    })
+    if design and hasattr(design, "get_condition_label"):
+        viz_df["condition_label"] = viz_df["condition"].map(
+            lambda c: design.get_condition_label(c)
+            if c in design.conditions else c
+        )
+    else:
+        viz_df["condition_label"] = viz_df["condition"].astype(str)
 
-    sns.scatterplot(
-        data=viz_df,
-        x="index",
-        y="cluster",
-        hue="condition_label",
-        palette=palette,
-        s=50,
-        alpha=0.7,
-        linewidth=0.3,
-        edgecolor="white",
-        ax=ax,
-    )
+    cond_order = list(dict.fromkeys(viz_df["condition_label"]))
+    cond_palette_list = sns.color_palette("Set2", n_colors=max(len(cond_order), 3))
+    cond_palette = dict(zip(cond_order, cond_palette_list))
 
-    ax.set_xlabel("Prediction index")
-    ax.set_ylabel("Predicted structural cluster")
+    for cond_label, sub in viz_df.groupby("condition_label", observed=True):
+        ax.scatter(
+            sub["index"], sub["cluster"],
+            s=16, marker="s", alpha=0.85,
+            color=cond_palette.get(cond_label, "#555555"),
+            edgecolors="none", label=cond_label,
+        )
+
+    ax.set_yticks(cluster_ids)
+    if len(cluster_ids) > 15:
+        # Keep tick text readable on dense assignments.
+        ax.set_yticklabels(
+            [str(cid + 1) if cid % 2 == 0 else "" for cid in cluster_ids],
+            fontsize=8,
+        )
+    else:
+        ax.set_yticklabels([f"{cid + 1}" for cid in cluster_ids], fontsize=8)
+    ax.set_ylim(min(cluster_ids) - 0.5, max(cluster_ids) + 0.5)
+    ax.set_xlim(-1, n)
+    ax.set_xlabel("Prediction index (ordered by predicted cluster)", fontsize=9)
+    ax.set_ylabel("Predicted structural cluster", fontsize=9)
     ax.set_title("  B. Cluster Assignments", loc="left", fontsize=11, fontweight="bold")
-    ax.tick_params(axis="both", labelsize=9)
+    ax.tick_params(axis="x", labelsize=8)
 
     sns.despine(ax=ax, left=True)
     ax.yaxis.grid(True, alpha=0.3)
 
-    # Legend
+    # Legend: conditions only (cluster identity is on the y-axis). Omitted
+    # entirely for a single condition.
     handles, labels = ax.get_legend_handles_labels()
-    if len(handles) > 12:
-        ax.legend(loc="center left", bbox_to_anchor=(1.0, 0.5), fontsize=8)
-    else:
-        ax.legend(loc="best", fontsize=9)
+    if len(handles) > 1:
+        ax.legend(
+            loc="center left", bbox_to_anchor=(1.0, 0.5), fontsize=7,
+            title="Condition",
+        )
 
     # Main title
     main_title = title or f"Structural Clustering ({n_clusters} clusters)"

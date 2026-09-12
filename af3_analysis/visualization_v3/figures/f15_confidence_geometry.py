@@ -87,11 +87,18 @@ def generate_f15_confidence_geometry(
             "warnings": ["All confidence-geometry values are NaN"],
         }
 
-    # Classify into categories
-    rmsd_high = 2.0  # configurable threshold
+    # Classify into categories. These cutoffs are pre-existing descriptive
+    # display thresholds inherited from the original figure. They are NOT
+    # validated classification boundaries; they are documented on the
+    # figure itself so the categorization is transparent.
+    rmsd_high = 2.0
     rmsd_low = 0.5
     plddt_high = 70.0
     plddt_low = 50.0
+    threshold_note = (
+        f"Descriptive display cutoffs: RMSD {rmsd_low}/{rmsd_high} Å, "
+        f"pLDDT {plddt_low}/{plddt_high} (not validated boundaries)"
+    )
 
     def classify(row):
         rmsd = row["rmsd_to_reference"]
@@ -128,7 +135,10 @@ def generate_f15_confidence_geometry(
     # --- Plot ---
     fig, axes = plt.subplots(1, 2, figsize=(SINGLE_COL_WIDTH, 5.0))
 
-    palette = sns.color_palette("Set2", n_colors=8)
+    # Palette sized to the categories actually present (avoids the seaborn
+    # warning when fewer categories occur).
+    palette = sns.color_palette(
+        "Set2", n_colors=max(df["category"].nunique(), 3))
 
     # Panel A: RMSD vs pLDDT scatter with categories
     ax = axes[0]
@@ -146,11 +156,22 @@ def generate_f15_confidence_geometry(
         ax=ax,
     )
 
-    # Add threshold lines
+    # Add threshold lines, labeled so the cutoffs are readable directly
+    # from the panel.
     ax.axhline(rmsd_high, color="red", linestyle="--", alpha=0.5, linewidth=1)
     ax.axhline(rmsd_low, color="green", linestyle="--", alpha=0.5, linewidth=1)
     ax.axvline(plddt_high, color="blue", linestyle="--", alpha=0.5, linewidth=1)
     ax.axvline(plddt_low, color="orange", linestyle="--", alpha=0.5, linewidth=1)
+    x_min, x_max = ax.get_xlim()
+    ax.text(x_max, rmsd_high, f" {rmsd_high} Å", va="bottom", ha="right",
+            fontsize=7, color="red", alpha=0.8)
+    ax.text(x_max, rmsd_low, f" {rmsd_low} Å", va="bottom", ha="right",
+            fontsize=7, color="green", alpha=0.8)
+    y_min, y_max = ax.get_ylim()
+    ax.text(plddt_high, y_max, f"pLDDT {plddt_high} ", va="top", ha="right",
+            fontsize=7, color="blue", alpha=0.8)
+    ax.text(plddt_low, y_max, f"pLDDT {plddt_low} ", va="top", ha="right",
+            fontsize=7, color="orange", alpha=0.8)
 
     ax.set_xlabel("Mean pLDDT")
     ax.set_ylabel("RMSD to Reference (Å)")
@@ -183,6 +204,7 @@ def generate_f15_confidence_geometry(
 
     if values:
         ax.bar(existing_cats, values, color=colors_cat, edgecolor="white", linewidth=0.8)
+        ax.set_xticks(range(len(existing_cats)))
         ax.set_xticklabels(existing_cats, rotation=45, ha="right", fontsize=8)
         ax.set_ylabel("Number of predictions")
 
@@ -198,9 +220,10 @@ def generate_f15_confidence_geometry(
     sns.despine(ax=ax, left=True)
     ax.yaxis.grid(True, alpha=0.3)
 
-    # Main title
-    main_title = title or "Confidence × Geometry"
-    fig.suptitle(main_title, fontsize=14, fontweight="bold", y=1.02)
+    # Main title: surface the descriptive cutoffs so the categorization is
+    # transparent to the reader.
+    main_title = title or f"Confidence × Geometry ({threshold_note})"
+    fig.suptitle(main_title, fontsize=12, fontweight="bold", y=1.02)
 
     fig.tight_layout(rect=[0, 0, 1, 0.95])
 
@@ -211,6 +234,10 @@ def generate_f15_confidence_geometry(
     warnings = []
     if n_obs == 0:
         warnings.append("Zero confidence-geometry observations")
+    warnings.append(
+        "Category cutoffs are descriptive display thresholds inherited from "
+        "the original figure, not validated classification boundaries"
+    )
 
     return {
         "status": "pass",
